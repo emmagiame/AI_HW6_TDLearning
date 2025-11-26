@@ -1,11 +1,81 @@
-## 
-# ANN_PartB_AI.py
-# Description: Neural Network-based AI Player for HW5 Part B.
-# Uses a trained neural network to evaluate game states.
-# The neural network is trained to mimic the heuristic evaluation from HW2_AI.
-# written by Emma Giamello
-# used ai to help when stuck
-##
+"""
+TODO: Convert from Supervised Learning to Temporal Difference Learning
+
+Steps to implement TD Learning:   
+
+1. remove heuristic utility class #DONE
+
+2. Implement TD Update Rule (Leonie)
+   - Replace supervised learning with TD(0): V(s) ← V(s) + α[R + γV(s') - V(s)]
+   - V(s) = current state value (neural network prediction)
+   - R = immediate reward from transition
+   - γ = discount factor (typically 0.9-0.99)
+   - V(s') = next state value
+   - α = learning rate
+   - TD learning should learn from actual game outcomes and state transitions
+
+3. Store State Transitions (Emma)
+   - Instead of (state, heuristic_value) pairs, store:
+     (current_state, action, reward, next_state, done)
+
+4. Define Reward Function (Emma)
+   - +1.0 for winning
+   - -1.0 for losing
+   - +0.1 for collecting food
+   - -0.01 for each turn (encourages faster wins)
+   - 0 otherwise
+
+5. Modify Training Logic (Emma)
+   - Change trainOnExample() to use TD targets instead of supervised targets
+   - trainOnTDExample(state, reward, next_state, done):
+       V_current = predict(state)
+       if done:
+           target = reward
+       else:
+           V_next = predict(next_state)
+           target = reward + gamma * V_next
+       td_error = target - V_current
+       backward(state, target)
+
+6. Update getMove() Method (Leonie)
+   - Store previous state before making a move
+   - After opponent's turn, calculate reward
+   - Train on transition: (prev_state, move, reward, current_state)
+
+7. Modify registerWin() Method (Leonie)
+   - Train on final transition with terminal reward
+   - Process entire episode's transitions
+   - Update network weights based on accumulated TD errors
+
+8. Add Episode Memory (Leonie)
+   - Store sequence of states and actions during each game:
+     self.episodeHistory = []  # List of (state, action, reward) tuples
+
+9. Add Exploration Strategy (Emma)
+    - Implement ε-greedy exploration:
+      * With probability ε, choose random move
+      * With probability (1-ε), choose best move according to network
+      * Decay ε over time (exploration → exploitation)
+      
+      
+      Categories of states:
+      1. Worker on food
+      2. worker with food on anthill or tunnel
+      3. attacker on board
+      4. attacker on enemies side of board
+      5. queen health is less than full
+      5. anthill health is less than full
+      6. enemy attacker is within 2 steps of queen
+      7. enemy ant is within 2 steps of anthill
+      8. food more than 8
+      9. food is more than or equal to 2
+      10. food is greater than enemies food
+      11. number of workers is equal to 1 
+      12. worker within 1 steps of food
+      13. worker with food within 1 step of anthill or tunnel
+      14. enemy attacker on board
+      
+"""
 
 import random
 import sys
@@ -29,6 +99,8 @@ import heapq
 # learns the utility function from HW2_AI through supervised learning.
 #
 ##
+#TODO: #2 Convert from Supervised Learning to Temporal Difference Learning
+# TD(0): V(s) ← V(s) + α[R + γV(s') - V(s)]
 class NeuralNetwork:
     def __init__(self, inputSize=13, hiddenSize1=32, hiddenSize2=16, outputSize=1, learningRate=0.5):
         self.learningRate = learningRate
@@ -177,6 +249,7 @@ class NeuralNetwork:
 # Description: Converts game state to normalized feature vector for neural network input.
 # Maps game state information to [0, 1] range for network accessibility.
 ##
+#TODO: #3 Store State Features for TD Learning, (current_state, action, reward, next_state, done)
 class StateEncoder:
     
     @staticmethod
@@ -292,100 +365,6 @@ class StateEncoder:
 
 
 ##
-# HeuristicUtility
-# Description: Import the heuristic utility function from HW2_AI for training.
-# This will be the target for neural network training.
-##
-class HeuristicUtility:
-    
-    @staticmethod
-    def evaluate(currentState, playerId, preCarrying=None):
-        ##
-        # Heuristic evaluation function (copied from HW2_AI).
-        # Used as training target for neural network.
-        ##
-        
-        if preCarrying is None:
-            preCarrying = {}
-        
-        # Start with base evaluation
-        evaluation = 0.5
-        
-        # Get inventories
-        myInv = currentState.inventories[playerId]
-        enemyId = 1 - playerId
-        enemyInv = currentState.inventories[enemyId]
-        
-        # Win condition: 11 food collected
-        if myInv.foodCount >= 11:
-            return 0.99
-        
-        # Loss condition: queen captured or no workers and losing food
-        myQueen = myInv.getQueen()
-        enemyQueen = enemyInv.getQueen()
-        
-        if not myQueen:
-            return 0.01
-        if not enemyQueen:
-            return 0.99
-        
-        # Get ants and constructions
-        myWorkers = getAntList(currentState, playerId, (WORKER,))
-        foods = getConstrList(currentState, 2, (FOOD,))
-        homeSpots = getConstrList(currentState, playerId, (ANTHILL, TUNNEL))
-        
-        numWorkers = len(myWorkers)
-        
-        # Penalty for having no workers (weighted up to -0.3)
-        if numWorkers == 0:
-            evaluation -= 0.3
-        
-        # Food progress (weighted up to 0.4)
-        if myInv.foodCount > 0:
-            food_progress = (myInv.foodCount / 11.0) * 0.4
-            evaluation += food_progress
-        
-        # Worker management (weighted to stay around 0.05)
-        if numWorkers > 1:
-            evaluation += 0.02  # Bonus for multiple workers
-        elif numWorkers == 1:
-            evaluation += 0.01  # Small bonus for having 1 worker
-        else:
-            evaluation -= 0.3  # Large penalty for no workers
-        
-        # Worker efficiency and movement toward goals (weighted up to 0.2)
-        if myWorkers and foods and homeSpots:
-            worker_efficiency = 0.0
-            
-            for worker in myWorkers:
-                workerID = worker.UniqueID
-                wasCarrying = preCarrying.get(workerID, False)
-                
-                # Reward for successful food pickup and delivery
-                if not wasCarrying and worker.carrying:
-                    worker_efficiency += 0.08
-                elif wasCarrying and not worker.carrying:
-                    worker_efficiency += 0.12
-                else:
-                    # Reward progress toward destination without moving
-                    if not worker.carrying:  # Heading to food
-                        closestFood = min(foods, key=lambda f: stepsToReach(currentState, worker.coords, f.coords))
-                        dist = stepsToReach(currentState, worker.coords, closestFood.coords)
-                        worker_efficiency += max(0, (10 - dist) / 10.0 * 0.03)
-                    else:  # Heading home with food
-                        closestHome = min(homeSpots, key=lambda f: stepsToReach(currentState, worker.coords, f.coords))
-                        dist = stepsToReach(currentState, worker.coords, closestHome.coords)
-                        worker_efficiency += max(0, (10 - dist) / 10.0 * 0.05)
-            
-            # Average efficiency across workers
-            if numWorkers > 0:
-                evaluation += min(0.2, worker_efficiency / numWorkers * 0.2)
-        
-        # Clamp final evaluation to valid range [0.0, 1.0]
-        return max(0.0, min(1.0, evaluation))
-
-
-##
 # AIPlayer
 # Description: The neural network-based AI player for HW5 Part B.
 # Uses a trained neural network to evaluate game states instead of heuristics.
@@ -456,6 +435,8 @@ class AIPlayer(Player):
             return moves
         else:
             return [(0, 0)]
+        
+    #TODO: #5 Define reward function and store transitions for TD Learning
     
     ##
     # Use neural network to evaluate moves.
@@ -486,6 +467,7 @@ class AIPlayer(Player):
                     utility = 0.0
             else:
                 # This ensures good gameplay while collecting training data
+                #TODO: #1 Replace heuristic with network prediction for TD learning
                 utility = HeuristicUtility.evaluate(nextState, currentState.whoseTurn)
             
             # Track best move
@@ -503,7 +485,6 @@ class AIPlayer(Player):
     
     ##
     # Called when the game ends - use for training.
-    # mainly used ai here to help format training feedback
     ##
     def registerWin(self, hasWon):
         # Train network on buffered game states if available
@@ -538,6 +519,7 @@ class AIPlayer(Player):
     # Train the network on a single game state.
     # Uses heuristic utility as the target.
     ##
+    #TODO
     def trainOnGameState(self, gameState):
         try:
             # If we've switched to hard-coded weights, do not call the heuristic.
@@ -547,6 +529,7 @@ class AIPlayer(Player):
             features = StateEncoder.encodeState(gameState, self.playerId)
             
             # Get target value from heuristic
+            #TODO: #1 Replace heuristic with network prediction for TD learning
             target = HeuristicUtility.evaluate(gameState, self.playerId)
             
             # Train network on this example
@@ -564,6 +547,7 @@ class AIPlayer(Player):
             # Do not add more training data once we switched to hard-coded weights
             if self.useHardcodedWeights:
                 return
+            #TODO: #1 Replace heuristic with network prediction for TD learning
             target = HeuristicUtility.evaluate(gameState, self.playerId)
             features = StateEncoder.encodeState(gameState, self.playerId)
             self.trainingBuffer.append((features, target))
