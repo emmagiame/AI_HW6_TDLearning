@@ -75,6 +75,13 @@ Steps to implement TD Learning:
       13. worker with food within 1 step of anthill or tunnel
       14. enemy attacker on board
       
+    After TD is fully implemented, remove legacy code:
+    - TODO_REMOVE: HeuristicUtility usage and class definitions
+    - TODO_REMOVE: supervised training buffer `trainingBuffer` and methods using targets
+    - TODO_REMOVE: hardcoded weights switching (`useHardcodedWeights`, `hardcodedWeights*`, `hardcodeThreshold`)
+    - TODO_REMOVE: registerWin() heuristic-driven training and weight-loading logic
+    - TODO_REMOVE: any fallback to heuristic in `getMove` and `trainOnGameState`
+    - TODO_REMOVE: file `trained_weights.json` if no longer needed
 """
 
 import random
@@ -202,6 +209,7 @@ class NeuralNetwork:
     ##
     # Train network on a single example.
     ##
+    # TODO_REMOVE: Supervised training helper (replaced by TD target training)
     def trainOnExample(self, X, y):
         # Forward pass
         prediction = self.forward(X)
@@ -366,8 +374,10 @@ class StateEncoder:
 
 ##
 # AIPlayer
-# Description: The neural network-based AI player for HW5 Part B.
-# Uses a trained neural network to evaluate game states instead of heuristics.
+# Description: Agent that learns V(s) via TD(0).
+# Notes:
+# - During transition: record (s, a, r, s', done)
+# - At episode end: train across transitions using TD targets
 ##
 class AIPlayer(Player):
     
@@ -381,26 +391,43 @@ class AIPlayer(Player):
         self.network = NeuralNetwork(inputSize=13, hiddenSize1=32, hiddenSize2=16, outputSize=1, learningRate=0.5)
         
         # Flag to indicate if we're using hard-coded weights
-        self.useHardcodedWeights = False
+        self.useHardcodedWeights = False  # TODO_REMOVE after TD impl
         
-        # Storage for training data (to follow the hint about randomization)
-        self.trainingBuffer = []
+        # Storage for training data (supervised targets)
+        self.trainingBuffer = []  # TODO_REMOVE: replace with TD transitions only
         
         # Hard-coded weights (will be set after training).
         # The full trained weights are shipped in `trained_weights.json`.
         # To avoid repeatedly calling the original heuristic after the
         # network is good enough we will load and use these weights.
-        self.hardcodedWeights = None
-        self.hardcodedWeightsPath = os.path.join(os.path.dirname(__file__), '..', 'trained_weights.json')
+        self.hardcodedWeights = None  # TODO_REMOVE
+        self.hardcodedWeightsPath = os.path.join(os.path.dirname(__file__), '..', 'trained_weights.json')  # TODO_REMOVE if unused
         # Threshold to decide when to switch to hard-coded weights.
-        self.hardcodeThreshold = 0.01
+        self.hardcodeThreshold = 0.01  # TODO_REMOVE
+
+        # TODO(step 3): Initialize transitions storage for TD learning
+        # Store tuples of (state_features, action, reward, next_state_features, done)
+        self.transitions = []
+
+        # TODO(step 4): Set TD parameters and placeholder reward shaping
+        self.gamma = 0.95  # discount factor
+        self.turnPenalty = -0.01  # small step penalty to encourage faster wins
+        
+        # TODO(step 9): ε-greedy exploration parameters
+        self.epsilon = 1.0  # Start with full exploration
+        self.epsilonMin = 0.05  # Minimum exploration rate
+        self.epsilonDecay = 0.995  # Decay rate per episode
+        
+        # TODO(step 3): Track previous state and action for transition recording
+        self.prevState = None
+        self.prevAction = None
     
     ##
     # Set hard-coded weights after training.
     ## 
     def setHardcodedWeights(self, weights):        
         self.network.setWeights(weights)
-        self.useHardcodedWeights = True
+        self.useHardcodedWeights = True  # TODO_REMOVE
     
     ##
     # Setup phase placement logic (same as HW2_AI).
@@ -436,20 +463,30 @@ class AIPlayer(Player):
         else:
             return [(0, 0)]
         
-    #TODO: #5 Define reward function and store transitions for TD Learning
     
     ##
-    # Use neural network to evaluate moves.
+    # Move selection
+    # For TD: replace heuristic fallback with ε-greedy over V(s') predictions
     ##
     def getMove(self, currentState):
+        # TODO(step 3): Finalize previous transition before selecting new move
+        # If prevState exists, call: addTransition(prevState, prevAction, currentState, done=False)
+        # This records the transition from last move after environment applied it
+        
         moves = listAllLegalMoves(currentState)
         
         if not moves:
             return Move(END)
         
-        # Collect training data from current state (only while training)
-        if not self.useHardcodedWeights:
-            self.addToTrainingBuffer(currentState)
+        # Collect training data from current state (legacy supervised) TODO_REMOVE
+        if not self.useHardcodedWeights:  # TODO_REMOVE
+            self.addToTrainingBuffer(currentState)  # TODO_REMOVE
+        
+        # TODO(step 9): Implement ε-greedy move selection
+        # if random.random() < self.epsilon:
+        #     bestMove = random.choice(moves)
+        # else:
+        #     # Use network to evaluate moves (see current logic below)
         
         bestMove = None
         bestUtility = -1
@@ -466,14 +503,18 @@ class AIPlayer(Player):
                 except Exception:
                     utility = 0.0
             else:
-                # This ensures good gameplay while collecting training data
-                #TODO: #1 Replace heuristic with network prediction for TD learning
-                utility = HeuristicUtility.evaluate(nextState, currentState.whoseTurn)
+                # TODO(step 9): Remove heuristic; use network prediction for exploration/exploitation
+                # Placeholder: keep heuristic until TD pipeline is wired
+                utility = HeuristicUtility.evaluate(nextState, currentState.whoseTurn)  # TODO_REMOVE
             
             # Track best move
             if utility > bestUtility:
                 bestUtility = utility
                 bestMove = move
+        
+        # TODO(step 3): Store current state and chosen move for next transition
+        # self.prevState = currentState
+        # self.prevAction = bestMove
         
         return bestMove if bestMove else Move(END)
     
@@ -484,42 +525,58 @@ class AIPlayer(Player):
         return enemyLocations[random.randint(0, len(enemyLocations) - 1)]
     
     ##
-    # Called when the game ends - use for training.
+    # Episode end: legacy supervised training (temporary)
+    # TODO(step 5): Call trainFromTransitions() to apply TD updates
     ##
     def registerWin(self, hasWon):
+        # TODO(step 3): Record final transition with terminal reward and done=True
+        # if self.prevState is not None:
+        #     finalReward = 1.0 if hasWon else -1.0
+        #     # Create terminal transition (nextState can be None or current)
+        #     # addTransition(self.prevState, self.prevAction, terminal, done=True, terminalReward)
+        
+        # TODO(step 5): Train from TD transitions collected during episode
+        # self.trainFromTransitions()
+        
+        # TODO(step 9): Decay epsilon after each episode
+        # self.epsilon = max(self.epsilonMin, self.epsilon * self.epsilonDecay)
+        
         # Train network on buffered game states if available
-        if self.trainingBuffer:
+        if self.trainingBuffer:  # TODO_REMOVE (legacy supervised end-episode training)
             # Perform training silently (no console output)
             try:
                 buffer_size = max(1, len(self.trainingBuffer))
                 epochs = min(400, max(50, buffer_size // 5))
                 totalError = self.trainOnBuffer(epochs=epochs)
 
+                # TODO(step 5): After an episode, also train from collected TD transitions
+                # Placeholder call: self.trainFromTransitions()
+
+                # TODO_REMOVE: heuristic-based convergence and hardcoded weights switching
+                # Keep until TD training is fully wired and stable
                 # If error is sufficiently low, load hard-coded weights
                 # and switch to using the neural network exclusively.
-                if totalError is not None and totalError < self.hardcodeThreshold:
-                    try:
-                        # Prefer embedded weights if available, otherwise load file
-                        if self.hardcodedWeights is None and os.path.exists(self.hardcodedWeightsPath):
-                            with open(self.hardcodedWeightsPath, 'r') as fh:
-                                weights = json.load(fh)
-                                self.setHardcodedWeights(weights)
-                        elif self.hardcodedWeights is not None:
-                            self.setHardcodedWeights(self.hardcodedWeights)
-
-                        # Clear buffer and stop further training
-                        self.trainingBuffer = []
-                    except Exception:
-                        pass
+                # (legacy Part B behavior)
+                # if totalError is not None and totalError < self.hardcodeThreshold:
+                #     try:
+                #         if self.hardcodedWeights is None and os.path.exists(self.hardcodedWeightsPath):
+                #             with open(self.hardcodedWeightsPath, 'r') as fh:
+                #                 weights = json.load(fh)
+                #                 self.setHardcodedWeights(weights)
+                #         elif self.hardcodedWeights is not None:
+                #             self.setHardcodedWeights(self.hardcodedWeights)
+                #         self.trainingBuffer = []
+                #     except Exception:
+                #         pass
             except Exception:
                 # swallow exceptions to avoid console output; training failure shouldn't stop game flow
                 pass
     
     ##
     # Train the network on a single game state.
-    # Uses heuristic utility as the target.
+    # Uses heuristic utility as the target. #TODO_REMOVE after TD impl
     ##
-    #TODO
+    # TODO(step 5): Convert to TD target training (keep for now for gameplay)
     def trainOnGameState(self, gameState):
         try:
             # If we've switched to hard-coded weights, do not call the heuristic.
@@ -528,9 +585,8 @@ class AIPlayer(Player):
             # Encode state
             features = StateEncoder.encodeState(gameState, self.playerId)
             
-            # Get target value from heuristic
-            #TODO: #1 Replace heuristic with network prediction for TD learning
-            target = HeuristicUtility.evaluate(gameState, self.playerId)
+            # TODO(step 9): Remove heuristic target; compute TD target instead
+            target = HeuristicUtility.evaluate(gameState, self.playerId)  # TODO_REMOVE
             
             # Train network on this example
             error = self.network.trainOnExample(features, target)
@@ -547,8 +603,8 @@ class AIPlayer(Player):
             # Do not add more training data once we switched to hard-coded weights
             if self.useHardcodedWeights:
                 return
-            #TODO: #1 Replace heuristic with network prediction for TD learning
-            target = HeuristicUtility.evaluate(gameState, self.playerId)
+            # TODO(step 5): Replace supervised target with TD target or store transition
+            target = HeuristicUtility.evaluate(gameState, self.playerId)  # TODO_REMOVE
             features = StateEncoder.encodeState(gameState, self.playerId)
             self.trainingBuffer.append((features, target))
         except:
@@ -557,6 +613,7 @@ class AIPlayer(Player):
     ##
     # Train on buffered states in random order.
     ##
+    # TODO_REMOVE: Supervised batch training loop (replaced by trainFromTransitions)
     def trainOnBuffer(self, epochs=100):
         if not self.trainingBuffer:
             return 0.0
@@ -579,3 +636,69 @@ class AIPlayer(Player):
             totalError = epochError / len(self.trainingBuffer)
         
         return totalError
+
+    # ===============================
+    # TD Learning scaffolding
+    # ===============================
+    # TODO(step 4): Immediate reward function for transitions
+    def computeReward(self, prevState, action, nextState, done, terminalReward=None):
+        # TODO(step 4): Expand reward shaping to include:
+        # - Terminal reward: +1.0 for winning, -1.0 for losing (pass via terminalReward param)
+        # - Food delivery reward: +0.1 when worker deposits food (check foodCount increment)
+        # - Enemy damage: small positive when enemy queen health decreases
+        # - Construction loss: penalty if anthill/tunnel destroyed
+        # - Worker loss: small penalty if worker count decreases
+        
+        if done and terminalReward is not None:
+            return terminalReward
+        
+        myInvPrev = prevState.inventories[self.playerId]
+        myInvNext = nextState.inventories[self.playerId]
+        reward = 0.0
+        
+        # Food collection delta
+        if myInvNext.foodCount > myInvPrev.foodCount:
+            reward += 0.1
+        
+        # Small time penalty each move
+        reward += self.turnPenalty
+        
+        # TODO(step 4): Add more shaping here
+        
+        return reward
+
+    # TODO(step 5): TD single-step training using TD(0)
+    def trainOnTDExample(self, stateFeatures, reward, nextStateFeatures, done):
+        try:
+            v_s = float(self.network.predict(stateFeatures))
+            target = reward if done else reward + self.gamma * float(self.network.predict(nextStateFeatures))
+            # Backprop toward TD target
+            self.network.trainOnExample(stateFeatures, target)
+            return (v_s - target) ** 2
+        except Exception:
+            return 0.0
+
+    # TODO(step 3): Record transition during move selection and environment step
+    def addTransition(self, prevState, action, nextState, done=False, terminalReward=None):
+        # TODO(step 3): Call this at start of getMove to finalize previous transition
+        # Call this in registerWin with done=True and terminalReward=+1/-1
+        try:
+            sf = StateEncoder.encodeState(prevState, self.playerId)
+            nsf = StateEncoder.encodeState(nextState, self.playerId) if nextState else None
+            # Reward computed from state diff; final outcome handled in registerWin
+            r = self.computeReward(prevState, action, nextState, done, terminalReward)
+            self.transitions.append((sf, action, r, nsf, done))
+        except Exception:
+            pass
+
+    # TODO(step 5): Train across collected transitions at episode end
+    def trainFromTransitions(self):
+        # TODO(step 5): Call this in registerWin after recording final transition
+        # Optionally: shuffle transitions for better convergence
+        # random.shuffle(self.transitions)
+        try:
+            for (sf, action, r, nsf, done) in self.transitions:
+                self.trainOnTDExample(sf, r, nsf, done)
+        finally:
+            # Clear transitions after training
+            self.transitions = []
