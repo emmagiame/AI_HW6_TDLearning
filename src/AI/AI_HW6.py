@@ -14,18 +14,18 @@ Steps to implement TD Learning:
    - α = learning rate
    - TD learning should learn from actual game outcomes and state transitions
 
-3. Store State Transitions (Emma)
+3. Store State Transitions (Emma) #DONE
    - Instead of (state, heuristic_value) pairs, store:
      (current_state, action, reward, next_state, done)
 
-4. Define Reward Function (Emma)
+4. Define Reward Function (Emma) #DONE
    - +1.0 for winning
    - -1.0 for losing
    - +0.1 for collecting food
    - -0.01 for each turn (encourages faster wins)
    - 0 otherwise
 
-5. Modify Training Logic (Emma)
+5. Modify Training Logic (Emma) #DONE
    - Change trainOnExample() to use TD targets instead of supervised targets
    - trainOnTDExample(state, reward, next_state, done):
        V_current = predict(state)
@@ -51,7 +51,7 @@ Steps to implement TD Learning:
    - Store sequence of states and actions during each game:
      self.episodeHistory = []  # List of (state, action, reward) tuples
 
-9. Add Exploration Strategy (Emma)
+9. Add Exploration Strategy (Emma) #DONE
     - Implement ε-greedy exploration:
       * With probability ε, choose random move
       * With probability (1-ε), choose best move according to network
@@ -95,12 +95,10 @@ import heapq
 
 ##
 # NeuralNetwork
-# Description: A multi-layer neural network that learns to evaluate game states.
-# learns the utility function from HW2_AI through supervised learning.
-#
+# Description: A multi-layer neural network that learns to evaluate game states
+# using Temporal Difference (TD) learning. The network predicts state values V(s)
+# and is trained via TD(0) updates: V(s) ← V(s) + α[R + γV(s') - V(s)].
 ##
-#TODO: #2 Convert from Supervised Learning to Temporal Difference Learning
-# TD(0): V(s) ← V(s) + α[R + γV(s') - V(s)]
 class NeuralNetwork:
     def __init__(self, inputSize=13, hiddenSize1=32, hiddenSize2=16, outputSize=1, learningRate=0.5):
         self.learningRate = learningRate
@@ -246,10 +244,24 @@ class NeuralNetwork:
 
 ##
 # StateEncoder
-# Description: Converts game state to normalized feature vector for neural network input.
-# Maps game state information to [0, 1] range for network accessibility.
+# Description: Converts game state to a normalized 13-feature vector for neural network input.
+# All features are normalized to [0, 1] range for consistent network training.
+#
+# Features encoded:
+#   0: Food collected (normalized to max 11)
+#   1: Number of workers (normalized to max 3)
+#   2: Number of soldiers (normalized to max 1)
+#   3: Queen health (normalized 0-20)
+#   4: Enemy queen health (normalized 0-20)
+#   5: Anthill health (normalized 0-3)
+#   6: Minimum distance from workers to food (normalized)
+#   7: Minimum distance from carrying workers to deposit (normalized)
+#   8: Workers carrying food (normalized)
+#   9: Enemy food count (normalized to max 11)
+#   10: Food advantage (normalized -11 to +11)
+#   11: Enemy soldiers on our side (normalized)
+#   12: Enemy threat to queen (distance-based, normalized)
 ##
-#TODO: #3 Store State Features for TD Learning, (current_state, action, reward, next_state, done)
 class StateEncoder:
     
     @staticmethod
@@ -366,8 +378,20 @@ class StateEncoder:
 
 ##
 # AIPlayer
-# Description: The neural network-based AI player for HW5 Part B.
-# Uses a trained neural network to evaluate game states instead of heuristics.
+# Description: An AI agent that uses TD(0) learning to play the Antics game.
+# The agent learns state values through self-play, using a neural network as
+# a function approximator for V(s).
+#
+# Key components:
+#   - ε-greedy exploration: Balances exploration vs exploitation (ε decays over episodes)
+#   - Transition storage: Records (s, a, r, s', done) tuples during gameplay
+#   - Reward shaping: 14+ reward categories encourage strategic behavior
+#   - TD(0) training: Updates value estimates using V(s) ← V(s) + α[R + γV(s') - V(s)]
+#
+# Learning parameters:
+#   - γ (gamma) = 0.95: Discount factor for future rewards
+#   - ε (epsilon) = 1.0 → 0.05: Exploration rate with 0.995 decay per episode
+#   - α (learning rate) = 0.5: Step size for gradient descent
 ##
 class AIPlayer(Player):
     
@@ -379,31 +403,23 @@ class AIPlayer(Player):
         
         # Initialize neural network
         self.network = NeuralNetwork(inputSize=13, hiddenSize1=32, hiddenSize2=16, outputSize=1, learningRate=0.5)
+
+        # Store tuples of (state_features, action, reward, next_state_features, done)
+        self.transitions = []
+
+        self.gamma = 0.95  # discount factor
+        self.turnPenalty = -0.01  # small step penalty to encourage faster wins
         
-        # Flag to indicate if we're using hard-coded weights
-        self.useHardcodedWeights = False
+        self.epsilon = 1.0  # Start with full exploration
+        self.epsilonMin = 0.05  # Minimum exploration rate
+        self.epsilonDecay = 0.995  # Decay rate per episode
         
-        # Storage for training data (to follow the hint about randomization)
-        self.trainingBuffer = []
-        
-        # Hard-coded weights (will be set after training).
-        # The full trained weights are shipped in `trained_weights.json`.
-        # To avoid repeatedly calling the original heuristic after the
-        # network is good enough we will load and use these weights.
-        self.hardcodedWeights = None
-        self.hardcodedWeightsPath = os.path.join(os.path.dirname(__file__), '..', 'trained_weights.json')
-        # Threshold to decide when to switch to hard-coded weights.
-        self.hardcodeThreshold = 0.01
+        self.prevState = None
+        self.prevAction = None
+    
     
     ##
-    # Set hard-coded weights after training.
-    ## 
-    def setHardcodedWeights(self, weights):        
-        self.network.setWeights(weights)
-        self.useHardcodedWeights = True
-    
-    ##
-    # Setup phase placement logic (same as HW2_AI).
+    # Setup phase placement logic (same as always).
     ##
     def getPlacement(self, currentState):
         numToPlace = 0
@@ -436,146 +452,313 @@ class AIPlayer(Player):
         else:
             return [(0, 0)]
         
-    #TODO: #5 Define reward function and store transitions for TD Learning
     
     ##
-    # Use neural network to evaluate moves.
+    # Move selection
+    # ε-greedy over V(s') predictions
     ##
     def getMove(self, currentState):
+        # adds transition from previous move
+        if self.prevState is not None and self.prevAction is not None:
+            # now in current state after taking prevAction from prevState
+            self.addTransition(
+                prevState=self.prevState,
+                action=self.prevAction,
+                nextState=currentState,
+                done=False, # game not done yet
+                terminalReward=None
+            )
+        
+        # consider all legal moves
         moves = listAllLegalMoves(currentState)
         
         if not moves:
             return Move(END)
         
-        # Collect training data from current state (only while training)
-        if not self.useHardcodedWeights:
-            self.addToTrainingBuffer(currentState)
-        
-        bestMove = None
-        bestUtility = -1
-        
-        for move in moves:
-            nextState = getNextState(currentState, move)
+        # ε-greedy: explore or exploit
+        if random.random() < self.epsilon:
+            # Explore: choose random move
+            bestMove = random.choice(moves)
+        else:
+            # Exploit: choose best move based on network evaluation
+            bestMove = None
+            bestUtility = -float('inf')
             
-            # Use network if we have switched to hard-coded weights,
-            # otherwise fall back to the heuristic (used while training).
-            if self.useHardcodedWeights:
+            for move in moves:
+                nextState = getNextState(currentState, move)
+                
                 try:
                     features = StateEncoder.encodeState(nextState, currentState.whoseTurn)
                     utility = float(self.network.predict(features))
                 except Exception:
                     utility = 0.0
-            else:
-                # This ensures good gameplay while collecting training data
-                #TODO: #1 Replace heuristic with network prediction for TD learning
-                utility = HeuristicUtility.evaluate(nextState, currentState.whoseTurn)
-            
-            # Track best move
-            if utility > bestUtility:
-                bestUtility = utility
-                bestMove = move
+                
+                if utility > bestUtility:
+                    bestUtility = utility
+                    bestMove = move
+               
+            # Fallback in case no best move found     
+            if bestMove is None:
+                bestMove = random.choice(moves)
         
-        return bestMove if bestMove else Move(END)
+        # what state we were in before making this move
+        self.prevState = currentState # Save state before move
+        self.prevAction = bestMove # Save chosen move
+        
+        return bestMove 
     
     ##
-    # Same as HW2_AI random attack selection.
+    # Same as always: random attack from available enemies
     ##
     def getAttack(self, currentState, attackingAnt, enemyLocations):
         return enemyLocations[random.randint(0, len(enemyLocations) - 1)]
     
     ##
-    # Called when the game ends - use for training.
+    # Store a transition for TD learning.
+    # finalize last transition with terminal reward, then train on all transitions
     ##
     def registerWin(self, hasWon):
-        # Train network on buffered game states if available
-        if self.trainingBuffer:
-            # Perform training silently (no console output)
-            try:
-                buffer_size = max(1, len(self.trainingBuffer))
-                epochs = min(400, max(50, buffer_size // 5))
-                totalError = self.trainOnBuffer(epochs=epochs)
-
-                # If error is sufficiently low, load hard-coded weights
-                # and switch to using the neural network exclusively.
-                if totalError is not None and totalError < self.hardcodeThreshold:
-                    try:
-                        # Prefer embedded weights if available, otherwise load file
-                        if self.hardcodedWeights is None and os.path.exists(self.hardcodedWeightsPath):
-                            with open(self.hardcodedWeightsPath, 'r') as fh:
-                                weights = json.load(fh)
-                                self.setHardcodedWeights(weights)
-                        elif self.hardcodedWeights is not None:
-                            self.setHardcodedWeights(self.hardcodedWeights)
-
-                        # Clear buffer and stop further training
-                        self.trainingBuffer = []
-                    except Exception:
-                        pass
-            except Exception:
-                # swallow exceptions to avoid console output; training failure shouldn't stop game flow
-                pass
+        # Record final transition with terminal reward and done=True
+        if self.prevState is not None:
+            finalReward = 1.0 if hasWon else -1.0
+            # Create terminal transition (nextState can be None or current since it does not matter)
+            self.addTransition(
+                prevState=self.prevState, 
+                action=self.prevAction, 
+                nextState=None,
+                done=True, 
+                terminalReward=finalReward
+            )
+        
+        # train on collected transitions
+        self.trainFromTransitions()
+        
+        # decay epsilon
+        self.epsilon = max(self.epsilonMin, self.epsilon * self.epsilonDecay)
+        
+        # Reset previous state/action for next episode
+        self.prevState = None
+        self.prevAction = None
     
+
+    # ===============================
+    # TD Learning scaffolding
+    # ===============================
+    
+    ## 
+    # compute reward for TD learning.
     ##
-    # Train the network on a single game state.
-    # Uses heuristic utility as the target.
+    def computeReward(self, prevState, action, nextState, done, terminalReward=None):
+        # terminal reward for win/loss
+        if done and terminalReward is not None:
+            return terminalReward
+        
+        reward = 0.0
+        # inventory info
+        myInvPrev = prevState.inventories[self.playerId]
+        myInvNext = nextState.inventories[self.playerId]
+        foods = getConstrList(prevState, 2, (FOOD,))
+        
+        # construction info
+        anthillPrev = myInvPrev.getAnthill()
+        anthillNext = myInvNext.getAnthill()
+        tunnelPrev = myInvPrev.getTunnels()
+        tunnelNext = myInvNext.getTunnels()
+        homeCoords = []
+        if anthillNext:
+            homeCoords.append(anthillNext.coords)
+        if tunnelNext:
+            homeCoords.extend([t.coords for t in tunnelNext])
+            
+        # enemy info
+        enemyId = 1 - self.playerId
+        enemySide = range(5,10) if self.playerId == 0 else range(0,5)
+        enemyInvPrev = prevState.inventories[enemyId]
+        enemyInvNext = nextState.inventories[enemyId]
+        enemyQueenPrev = getAntList(prevState, enemyId, (QUEEN,))
+        enemyQueenNext = getAntList(nextState, enemyId, (QUEEN,))
+        if enemyQueenPrev:
+            enemyQueenPrev = enemyQueenPrev[0]
+        if enemyQueenNext:
+            enemyQueenNext = enemyQueenNext[0]
+        enemyAttackersPrev = getAntList(prevState, enemyId, (SOLDIER,))
+        enemyAttackersNext = getAntList(nextState, enemyId, (SOLDIER,))
+        
+        # Ant info
+        myWorkersPrev = getAntList(prevState, self.playerId, (WORKER,))
+        myWorkersNext = getAntList(nextState, self.playerId, (WORKER,))
+        workerOnFoodPrev = sum(1 for w in myWorkersPrev if not w.carrying and any(w.coords == f.coords for f in foods))
+        workerOnFoodNext = sum(1 for w in myWorkersNext if not w.carrying and any(w.coords == f.coords for f in foods))
+        workerDeliveringPrev = sum(1 for w in myWorkersPrev if w.carrying and w.coords in homeCoords)
+        workerDeliveringNext = sum(1 for w in myWorkersNext if w.carrying and w.coords in homeCoords)
+        workersNearFoodPrev = sum(1 for w in myWorkersPrev if not w.carrying and any(approxDist(w.coords, f.coords) <= 1 for f in foods))
+        workersNearFoodNext = sum(1 for w in myWorkersNext if not w.carrying and any(approxDist(w.coords, f.coords) <= 1 for f in foods))
+        workersNearHomePrev = sum(1 for w in myWorkersPrev if w.carrying and any(approxDist(w.coords, h) <= 1 for h in homeCoords))
+        workersNearHomeNext = sum(1 for w in myWorkersNext if w.carrying and any(approxDist(w.coords, h) <= 1 for h in homeCoords))
+        workerCountPrev = len(myWorkersPrev)
+        workerCountNext = len(myWorkersNext)
+        myAttackersPrev = getAntList(prevState, self.playerId, (SOLDIER,))
+        myAttackersNext = getAntList(nextState, self.playerId, (SOLDIER,))
+        attackersOnEnemySidePrev = sum(1 for a in myAttackersPrev if a.coords[1] in enemySide)
+        attackersOnEnemySideNext = sum(1 for a in myAttackersNext if a.coords[1] in enemySide)
+        myQueenPrev = myInvPrev.getQueen()
+        myQueenNext = myInvNext.getQueen()
+        
+        # other info
+        carryingPrev = sum(1 for w in myWorkersPrev if w.carrying) # if previous worker was carrying
+        carryingNext = sum(1 for w in myWorkersNext if w.carrying) # if next worker is carrying/ will be carrying
+        threatsNearQueenPrev = sum(1 for a in enemyAttackersPrev if approxDist(a.coords, myQueenPrev.coords) <= 2) if myQueenPrev else 0
+        threatsNearQueenNext = sum(1 for a in enemyAttackersNext if myQueenNext and approxDist(a.coords, myQueenNext.coords) <= 2) 
+        threatsNearAnthillPrev = sum(1 for a in enemyAttackersPrev if approxDist(a.coords, anthillPrev.coords) <= 2) if anthillPrev else 0
+        threatsNearAnthillNext = sum(1 for a in enemyAttackersNext if anthillNext and approxDist(a.coords, anthillNext.coords) <= 2) 
+    
+        # 1. worker on food but not carrying
+        if workerOnFoodNext > workerOnFoodPrev:
+            reward += 0.05 * (workerOnFoodNext - workerOnFoodPrev)
+        
+        # 2. worker with food on anthill or tunnel
+        if workerDeliveringNext > workerDeliveringPrev:
+            reward += 0.1 * (workerDeliveringNext - workerDeliveringPrev)
+        
+        # 3. attacker on board
+        if len(myAttackersNext) > len(myAttackersPrev):
+            reward += 0.03 # small reward for having attackers
+        
+        # 4. attacker on enemies side of board
+        if attackersOnEnemySideNext > attackersOnEnemySidePrev:
+            reward += 0.04 # reward for pushing attackers forward
+        
+        # 5. queen health is less than full
+        if myQueenPrev and myQueenNext:
+            if myQueenNext.health < myQueenPrev.health:
+                damage = myQueenPrev.health - myQueenNext.health
+                reward -= 0.02 * damage # small penalty per damage point
+        
+        # 6. anthill health is less than full
+        if anthillPrev and anthillNext:
+            if anthillNext.captureHealth < anthillPrev.captureHealth:
+                damage = anthillPrev.captureHealth - anthillNext.captureHealth
+                reward -= 0.02 * damage # small penalty per damage point
+        
+        # 7. enemy attacker is within 2 steps of queen
+        if myQueenNext and enemyAttackersNext:
+            if threatsNearQueenNext > threatsNearQueenPrev:
+                reward -= 0.08 # penalty for more threats near queen
+        
+        # 8. enemy ant is within 2 steps of anthill
+        if anthillNext and enemyAttackersNext:
+            if threatsNearAnthillNext > threatsNearAnthillPrev:
+                reward -= 0.06 # penalty for more threats near anthill
+        
+        # 9. food more than 8
+        if myInvPrev.foodCount < 8 and myInvNext.foodCount >= 8:
+            reward += 0.2 # big reward for reaching food milestone
+        
+        # 10. food is more than or equal to 2
+        if myInvPrev.foodCount < 2 and myInvNext.foodCount >= 2:
+            reward += 0.05 # reward for reaching food milestone
+        
+        # 11. food is greater than enemies food
+        if myInvNext.foodCount > enemyInvNext.foodCount and myInvPrev.foodCount <= enemyInvPrev.foodCount:
+            reward += 0.03 # reward for having more food than enemy
+        if myInvNext.foodCount < enemyInvNext.foodCount and myInvPrev.foodCount >= enemyInvPrev.foodCount:
+            reward -= 0.03 # penalty for having less food than enemy
+        
+        # 12. number of workers is equal to 1
+        if len(myWorkersPrev) != 1 and len(myWorkersNext) == 1:
+            reward += 0.02 # small reward for having exactly 1 worker
+        if len(myWorkersPrev) == 1 and len(myWorkersNext) != 1:
+            reward -= 0.02 # small penalty for losing exact 1 worker status
+            
+        # 13. worker within 1 steps of food
+        if foods and myWorkersNext:
+            if workersNearFoodNext > workersNearFoodPrev:
+                reward += 0.02 # small reward for workers approaching food
+        
+        # 14. worker with food within 1 step of anthill or tunnel
+        if homeCoords and myWorkersNext:
+            if workersNearHomeNext > workersNearHomePrev:
+                reward += 0.03 # small reward for workers approaching home while carrying food
+        
+        # 15. enemy attacker on board
+        if len(enemyAttackersNext) > len(enemyAttackersPrev):
+            reward -= 0.02 # small penalty for enemy attackers being on board
+        
+        ### Additional reward shaping ###
+        
+        # Food delivery reward
+        if myInvNext.foodCount > myInvPrev.foodCount:
+            reward += 0.15 # more valuable than just picking up food
+            
+        # Food pick-up reward
+        if carryingNext > carryingPrev:
+            reward += 0.05 * (carryingNext - carryingPrev)
+            
+        # Enemy queen damage reward
+        if enemyQueenPrev and enemyQueenNext:
+            if enemyQueenNext.health < enemyQueenPrev.health:
+                damage = enemyQueenPrev.health - enemyQueenNext.health
+                reward += 0.02 * damage # small reward per damage point
+        
+        # Big reward for killing enemy queen
+        if enemyQueenPrev and not enemyQueenNext:
+            reward += 0.5 # big reward for winning fight but still less than terminal win reward
+        
+        # Anthill loss penalty
+        if anthillPrev and not anthillNext:
+            reward -= 0.3 # big penalty for losing anthill
+            
+        # Tunnel loss penalty
+        if tunnelPrev and not tunnelNext:
+            reward -= 0.2 # penalty for losing tunnel
+        
+        # Worker loss penalty
+        if workerCountNext < workerCountPrev:
+            reward -= 0.05 * (workerCountPrev - workerCountNext)
+            
+        # Small penalty for too many workers (waste of resources)
+        if workerCountNext > 3:
+            reward -= 0.01
+        
+        return reward
+
     ##
-    #TODO
-    def trainOnGameState(self, gameState):
+    # Train on a single TD example.
+    ##
+    def trainOnTDExample(self, stateFeatures, reward, nextStateFeatures, done):
         try:
-            # If we've switched to hard-coded weights, do not call the heuristic.
-            if self.useHardcodedWeights:
-                return 0.0
-            # Encode state
-            features = StateEncoder.encodeState(gameState, self.playerId)
-            
-            # Get target value from heuristic
-            #TODO: #1 Replace heuristic with network prediction for TD learning
-            target = HeuristicUtility.evaluate(gameState, self.playerId)
-            
-            # Train network on this example
-            error = self.network.trainOnExample(features, target)
-            
-            return error
-        except:
+            v_s = float(self.network.predict(stateFeatures))
+            target = reward if done else reward + self.gamma * float(self.network.predict(nextStateFeatures))
+            # Backprop toward TD target
+            self.network.trainOnExample(stateFeatures, target)
+            return (v_s - target) ** 2
+        except Exception:
             return 0.0
-    
+
     ##
-    # Add a game state to the training buffer.
+    # Store a transition for later training.
     ##
-    def addToTrainingBuffer(self, gameState):
+    def addTransition(self, prevState, action, nextState, done=False, terminalReward=None):
+        # Call this in registerWin with done=True and terminalReward=+1/-1
         try:
-            # Do not add more training data once we switched to hard-coded weights
-            if self.useHardcodedWeights:
-                return
-            #TODO: #1 Replace heuristic with network prediction for TD learning
-            target = HeuristicUtility.evaluate(gameState, self.playerId)
-            features = StateEncoder.encodeState(gameState, self.playerId)
-            self.trainingBuffer.append((features, target))
-        except:
+            sf = StateEncoder.encodeState(prevState, self.playerId)
+            nsf = StateEncoder.encodeState(nextState, self.playerId) if nextState else None
+            # Reward computed from state diff; final outcome handled in registerWin
+            r = self.computeReward(prevState, action, nextState, done, terminalReward)
+            self.transitions.append((sf, action, r, nsf, done))
+        except Exception:
             pass
-    
+
     ##
-    # Train on buffered states in random order.
+    # Train from all stored transitions.
     ##
-    def trainOnBuffer(self, epochs=100):
-        if not self.trainingBuffer:
-            return 0.0
+    def trainFromTransitions(self):
+        # shuffle transitions for better convergence
+        random.shuffle(self.transitions)
         
-        totalError = 0.0
-        
-        for epoch in range(epochs):
-            # Randomize order
-            random.shuffle(self.trainingBuffer)
-            
-            # Train on all examples
-            epochError = 0.0
-            for features, target in self.trainingBuffer:
-                try:
-                    error = self.network.trainOnExample(features, target)
-                    epochError += error
-                except:
-                    pass
-            
-            totalError = epochError / len(self.trainingBuffer)
-        
-        return totalError
+        try:
+            for (sf, action, r, nsf, done) in self.transitions:
+                self.trainOnTDExample(sf, r, nsf, done)
+        finally:
+            # Clear transitions after training
+            self.transitions = []
