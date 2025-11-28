@@ -469,10 +469,8 @@ class AIPlayer(Player):
     # For TD: replace heuristic fallback with ε-greedy over V(s') predictions
     ##
     def getMove(self, currentState):
-        # TODO(step 3): Finalize previous transition before selecting new move
         # If prevState exists, call: addTransition(prevState, prevAction, currentState, done=False)
         # This records the transition from last move after environment applied it
-        
         if self.prevState is not None and self.prevAction is not None:
             # now in current state after taking prevAction from prevState
             self.addTransition(
@@ -488,10 +486,6 @@ class AIPlayer(Player):
         
         if not moves:
             return Move(END)
-        
-        # Collect training data from current state (legacy supervised) TODO_REMOVE
-        if not self.useHardcodedWeights:  # TODO_REMOVE
-            self.addToTrainingBuffer(currentState)  # TODO_REMOVE
         
         # TODO(step 9): Implement ε-greedy move selection
         # if random.random() < self.epsilon:
@@ -523,7 +517,6 @@ class AIPlayer(Player):
                 bestUtility = utility
                 bestMove = move
         
-        # TODO(step 3): Store current state and chosen move for next transition
         # what state we were in before making this move
         self.prevState = currentState # Save state before move
         self.prevAction = bestMove # Save chosen move
@@ -645,18 +638,173 @@ class AIPlayer(Player):
         if done and terminalReward is not None:
             return terminalReward
         
+        reward = 0.0
+        # inventory info
         myInvPrev = prevState.inventories[self.playerId]
         myInvNext = nextState.inventories[self.playerId]
-        reward = 0.0
+        foods = getConstrList(prevState, 2, (FOOD,))
         
-        # Food collection delta
+        # construction info
+        anthillPrev = myInvPrev.getAnthill()
+        anthillNext = myInvNext.getAnthill()
+        tunnelPrev = myInvPrev.getTunnels()
+        tunnelNext = myInvNext.getTunnels()
+        homeCoords = []
+        if anthillNext:
+            homeCoords.append(anthillNext.coords)
+        if tunnelNext:
+            homeCoords.extend([t.coords for t in tunnelNext])
+            
+        
+        # Ant info
+        myWorkersPrev = getAntList(prevState, self.playerId, (WORKER,))
+        myWorkersNext = getAntList(nextState, self.playerId, (WORKER,))
+        workerOnFoodPrev = sum(1 for w in myWorkersPrev if not w.carrying and any(w.coords == f.coords for f in foods))
+        workerOnFoodNext = sum(1 for w in myWorkersNext if not w.carrying and any(w.coords == f.coords for f in foods))
+        workerDeliveringPrev = sum(1 for w in myWorkersPrev if w.carrying and w.coords in homeCoords)
+        workerDeliveringNext = sum(1 for w in myWorkersNext if w.carrying and w.coords in homeCoords)
+        workersNearFoodPrev = sum(1 for w in myWorkersPrev if not w.carrying and any(approxDist(w.coords, f.coords) <= 1 for f in foods))
+        workersNearFoodNext = sum(1 for w in myWorkersNext if not w.carrying and any(approxDist(w.coords, f.coords) <= 1 for f in foods))
+        workersNearHomePrev = sum(1 for w in myWorkersPrev if w.carrying and any(approxDist(w.coords, h) <= 1 for h in homeCoords))
+        workersNearHomeNext = sum(1 for w in myWorkersNext if w.carrying and any(approxDist(w.coords, h) <= 1 for h in homeCoords))
+        workerCountPrev = len(myWorkersPrev)
+        workerCountNext = len(myWorkersNext)
+        myAttackersPrev = getAntList(prevState, self.playerId, (SOLDIER,))
+        myAttackersNext = getAntList(nextState, self.playerId, (SOLDIER,))
+        attackersOnEnemySidePrev = sum(1 for a in myAttackersPrev if a.coords[1] in enemySide)
+        attackersOnEnemySideNext = sum(1 for a in myAttackersNext if a.coords[1] in enemySide)
+        myQueenPrev = myInvPrev.getQueen()
+        myQueenNext = myInvNext.getQueen()
+        
+        # other info
+        carryingPrev = sum(1 for w in myWorkersPrev if w.carrying) # if previous worker was carrying
+        carryingNext = sum(1 for w in myWorkersNext if w.carrying) # if next worker is carrying/ will be carrying
+        threatsNearQueenPrev = sum(1 for a in enemyAttackersPrev if approxDist(a.coords, myQueenPrev.coords) <= 2) if myQueenPrev else 0
+        threatsNearQueenNext = sum(1 for a in enemyAttackersNext if approxDist(a.coords, myQueenNext.coords) <= 2) 
+        threatsNearAnthillPrev = sum(1 for a in enemyAttackersPrev if approxDist(a.coords, anthillPrev.coords) <= 2) if anthillPrev else 0
+        threatsNearAnthillNext = sum(1 for a in enemyAttackersNext if approxDist(a.coords, anthillNext.coords) <= 2) 
+        
+        # enemy info
+        enemyId = 1 - self.playerId
+        enemySide = range(5,10) if self.playerId == 0 else range(0,5)
+        enemyInvPrev = prevState.inventories[enemyId]
+        enemyInvNext = nextState.inventories[enemyId]
+        enemyQueenPrev = getAntList(prevState, enemyId, (QUEEN,))
+        enemyQueenNext = getAntList(nextState, enemyId, (QUEEN,))
+        if enemyQueenPrev:
+            enemyQueenPrev = enemyQueenPrev[0]
+        if enemyQueenNext:
+            enemyQueenNext = enemyQueenNext[0]
+        enemyAttackersPrev = getAntList(prevState, enemyId, (SOLDIER,))
+        enemyAttackersNext = getAntList(nextState, enemyId, (SOLDIER,))
+    
+        # 1. worker on food but not carrying
+        if workerOnFoodNext > workerOnFoodPrev:
+            reward += 0.05 * (workerOnFoodNext - workerOnFoodPrev)
+        
+        # 2. worker with food on anthill or tunnel
+        if workerDeliveringNext > workerDeliveringPrev:
+            reward += 0.1 * (workerDeliveringNext - workerDeliveringPrev)
+        
+        # 3. attacker on board
+        if len(myAttackersNext) > len(myAttackersPrev):
+            reward += 0.03 # small reward for having attackers
+        
+        # 4. attacker on enemies side of board
+        if attackersOnEnemySideNext > attackersOnEnemySidePrev:
+            reward += 0.04 # reward for pushing attackers forward
+        
+        # 5. queen health is less than full
+        if myQueenPrev and myQueenNext:
+            if myQueenNext.health < myQueenPrev.health:
+                damage = myQueenPrev.health - myQueenNext.health
+                reward -= 0.02 * damage # small penalty per damage point
+        
+        # 6. anthill health is less than full
+        if anthillPrev and anthillNext:
+            if anthillNext.captureHealth < anthillPrev.captureHealth:
+                damage = anthillPrev.captureHealth - anthillNext.captureHealth
+                reward -= 0.02 * damage # small penalty per damage point
+        
+        # 7. enemy attacker is within 2 steps of queen
+        if myQueenNext and enemyAttackersNext:
+            if threatsNearQueenNext > threatsNearQueenPrev:
+                reward -= 0.08 # penalty for more threats near queen
+        
+        # 8. enemy ant is within 2 steps of anthill
+        if anthillNext and enemyAttackersNext:
+            if threatsNearAnthillNext > threatsNearAnthillPrev:
+                reward -= 0.06 # penalty for more threats near anthill
+        
+        # 9. food more than 8
+        if myInvPrev.foodCount < 8 and myInvNext.foodCount >= 8:
+            reward += 0.2 # big reward for reaching food milestone
+        
+        # 10. food is more than or equal to 2
+        if myInvPrev.foodCount < 2 and myInvNext.foodCount >= 2:
+            reward += 0.05 # reward for reaching food milestone
+        
+        # 11. food is greater than enemies food
+        if myInvNext.foodCount > enemyInvNext.foodCount and myInvPrev.foodCount <= enemyInvPrev.foodCount:
+            reward += 0.03 # reward for having more food than enemy
+        if myInvNext.foodCount < enemyInvNext.foodCount and myInvPrev.foodCount >= enemyInvPrev.foodCount:
+            reward -= 0.03 # penalty for having less food than enemy
+        
+        # 12. number of workers is equal to 1
+        if len(myWorkersPrev) != 1 and len(myWorkersNext) == 1:
+            reward += 0.02 # small reward for having exactly 1 worker
+        if len(myWorkersPrev) == 1 and len(myWorkersNext) != 1:
+            reward -= 0.02 # small penalty for losing exact 1 worker status
+            
+        # 13. worker within 1 steps of food
+        if foods and myWorkersNext:
+            if workersNearFoodNext > workersNearFoodPrev:
+                reward += 0.02 # small reward for workers approaching food
+        
+        # 14. worker with food within 1 step of anthill or tunnel
+        if homeCoords and myWorkersNext:
+            if workersNearHomeNext > workersNearHomePrev:
+                reward += 0.03 # small reward for workers approaching home while carrying food
+        
+        # 15. enemy attacker on board
+        if len(enemyAttackersNext) > len(enemyAttackersPrev):
+            reward -= 0.02 # small penalty for enemy attackers being on board
+        
+        ### Additional reward shaping ###
+        
+        # Food delivery reward
         if myInvNext.foodCount > myInvPrev.foodCount:
-            reward += 0.1
+            reward += 0.15 # more valuable than just picking up food
+            
+        # Food pick-up reward
+        if carryingNext > carryingPrev:
+            reward += 0.05 * (carryingNext - carryingPrev)
+            
+        # Enemy queen damage reward
+        if enemyQueenPrev and enemyQueenNext:
+            if enemyQueenNext.health < enemyQueenPrev.health:
+                damage = enemyQueenPrev.health - enemyQueenNext.health
+                reward += 0.02 * damage # small reward per damage point
         
-        # Small time penalty each move
-        reward += self.turnPenalty
+        # Big reward for killing enemy queen
+        if enemyQueenPrev and not enemyQueenNext:
+            reward += 0.5 # big reward for winning fight but still less than terminal win reward
         
-        # TODO(step 4): Add more shaping here
+        # Anthill loss penalty
+        if anthillPrev and not anthillNext:
+            reward -= 0.3 # big penalty for losing anthill
+            
+        # Tunnel loss penalty
+        if tunnelPrev and not tunnelNext:
+            reward -= 0.2 # penalty for losing tunnel
+        
+        # Worker loss penalty
+        if workerCountNext < workerCountPrev:
+            reward -= 0.05 * (workerCountPrev - workerCountNext)
+            
+        # Small penalty for too many workers (waste of resources)
+        if workerCountNext > 3:
+            reward -= 0.01
         
         return reward
 
@@ -673,7 +821,6 @@ class AIPlayer(Player):
 
     # TODO(step 3): Record transition during move selection and environment step
     def addTransition(self, prevState, action, nextState, done=False, terminalReward=None):
-        # TODO(step 3): Call this at start of getMove to finalize previous transition
         # Call this in registerWin with done=True and terminalReward=+1/-1
         try:
             sf = StateEncoder.encodeState(prevState, self.playerId)
