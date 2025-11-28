@@ -14,7 +14,7 @@ Steps to implement TD Learning:
    - α = learning rate
    - TD learning should learn from actual game outcomes and state transitions
 
-3. Store State Transitions (Emma)
+3. Store State Transitions (Emma) #DONE
    - Instead of (state, heuristic_value) pairs, store:
      (current_state, action, reward, next_state, done)
 
@@ -473,6 +473,17 @@ class AIPlayer(Player):
         # If prevState exists, call: addTransition(prevState, prevAction, currentState, done=False)
         # This records the transition from last move after environment applied it
         
+        if self.prevState is not None and self.prevAction is not None:
+            # now in current state after taking prevAction from prevState
+            self.addTransition(
+                prevState=self.prevState,
+                action=self.prevAction,
+                nextState=currentState,
+                done=False, # game not done yet
+                terminalReward=None
+            )
+        
+        # consider all legal moves
         moves = listAllLegalMoves(currentState)
         
         if not moves:
@@ -513,8 +524,9 @@ class AIPlayer(Player):
                 bestMove = move
         
         # TODO(step 3): Store current state and chosen move for next transition
-        # self.prevState = currentState
-        # self.prevAction = bestMove
+        # what state we were in before making this move
+        self.prevState = currentState # Save state before move
+        self.prevAction = bestMove # Save chosen move
         
         return bestMove if bestMove else Move(END)
     
@@ -526,51 +538,32 @@ class AIPlayer(Player):
     
     ##
     # Episode end: legacy supervised training (temporary)
-    # TODO(step 5): Call trainFromTransitions() to apply TD updates
+    # For TD: finalize last transition with terminal reward, then train on all transitions
     ##
     def registerWin(self, hasWon):
-        # TODO(step 3): Record final transition with terminal reward and done=True
-        # if self.prevState is not None:
-        #     finalReward = 1.0 if hasWon else -1.0
-        #     # Create terminal transition (nextState can be None or current)
-        #     # addTransition(self.prevState, self.prevAction, terminal, done=True, terminalReward)
+        # Record final transition with terminal reward and done=True
+        if self.prevState is not None:
+            finalReward = 1.0 if hasWon else -1.0
+            # Create terminal transition (nextState can be None or current since it does not matter)
+            self.addTransition(
+                prevState=self.prevState, 
+                action=self.prevAction, 
+                nextState=None,
+                done=True, 
+                terminalReward=finalReward
+            )
         
-        # TODO(step 5): Train from TD transitions collected during episode
-        # self.trainFromTransitions()
+        # train on collected transitions
+        self.trainFromTransitions()
         
-        # TODO(step 9): Decay epsilon after each episode
-        # self.epsilon = max(self.epsilonMin, self.epsilon * self.epsilonDecay)
+        # decay epsilon
+        self.epsilon = max(self.epsilonMin, self.epsilon * self.epsilonDecay)
         
-        # Train network on buffered game states if available
-        if self.trainingBuffer:  # TODO_REMOVE (legacy supervised end-episode training)
-            # Perform training silently (no console output)
-            try:
-                buffer_size = max(1, len(self.trainingBuffer))
-                epochs = min(400, max(50, buffer_size // 5))
-                totalError = self.trainOnBuffer(epochs=epochs)
-
-                # TODO(step 5): After an episode, also train from collected TD transitions
-                # Placeholder call: self.trainFromTransitions()
-
-                # TODO_REMOVE: heuristic-based convergence and hardcoded weights switching
-                # Keep until TD training is fully wired and stable
-                # If error is sufficiently low, load hard-coded weights
-                # and switch to using the neural network exclusively.
-                # (legacy Part B behavior)
-                # if totalError is not None and totalError < self.hardcodeThreshold:
-                #     try:
-                #         if self.hardcodedWeights is None and os.path.exists(self.hardcodedWeightsPath):
-                #             with open(self.hardcodedWeightsPath, 'r') as fh:
-                #                 weights = json.load(fh)
-                #                 self.setHardcodedWeights(weights)
-                #         elif self.hardcodedWeights is not None:
-                #             self.setHardcodedWeights(self.hardcodedWeights)
-                #         self.trainingBuffer = []
-                #     except Exception:
-                #         pass
-            except Exception:
-                # swallow exceptions to avoid console output; training failure shouldn't stop game flow
-                pass
+        # Reset previous state/action for next episode
+        self.prevState = None
+        self.prevAction = None
+        
+        
     
     ##
     # Train the network on a single game state.
