@@ -419,7 +419,7 @@ class AIPlayer(Player):
     
     
     ##
-    # Setup phase placement logic (same as HW2_AI).
+    # Setup phase placement logic (same as always).
     ##
     def getPlacement(self, currentState):
         numToPlace = 0
@@ -455,11 +455,10 @@ class AIPlayer(Player):
     
     ##
     # Move selection
-    # For TD: replace heuristic fallback with ε-greedy over V(s') predictions
+    # ε-greedy over V(s') predictions
     ##
     def getMove(self, currentState):
-        # If prevState exists, call: addTransition(prevState, prevAction, currentState, done=False)
-        # This records the transition from last move after environment applied it
+        # adds transition from previous move
         if self.prevState is not None and self.prevAction is not None:
             # now in current state after taking prevAction from prevState
             self.addTransition(
@@ -475,12 +474,6 @@ class AIPlayer(Player):
         
         if not moves:
             return Move(END)
-        
-        # TODO(step 9): Implement ε-greedy move selection
-        # if random.random() < self.epsilon:
-        #     bestMove = random.choice(moves)
-        # else:
-        #     # Use network to evaluate moves (see current logic below)
         
         # ε-greedy: explore or exploit
         if random.random() < self.epsilon:
@@ -515,14 +508,14 @@ class AIPlayer(Player):
         return bestMove 
     
     ##
-    # Same as HW2_AI random attack selection.
+    # Same as always: random attack from available enemies
     ##
     def getAttack(self, currentState, attackingAnt, enemyLocations):
         return enemyLocations[random.randint(0, len(enemyLocations) - 1)]
     
     ##
-    # Episode end: legacy supervised training (temporary)
-    # For TD: finalize last transition with terminal reward, then train on all transitions
+    # Store a transition for TD learning.
+    # finalize last transition with terminal reward, then train on all transitions
     ##
     def registerWin(self, hasWon):
         # Record final transition with terminal reward and done=True
@@ -551,8 +544,12 @@ class AIPlayer(Player):
     # ===============================
     # TD Learning scaffolding
     # ===============================
+    
+    ## 
+    # compute reward for TD learning.
+    ##
     def computeReward(self, prevState, action, nextState, done, terminalReward=None):
-        
+        # terminal reward for win/loss
         if done and terminalReward is not None:
             return terminalReward
         
@@ -725,6 +722,9 @@ class AIPlayer(Player):
         
         return reward
 
+    ##
+    # Train on a single TD example.
+    ##
     def trainOnTDExample(self, stateFeatures, reward, nextStateFeatures, done):
         try:
             v_s = float(self.network.predict(stateFeatures))
@@ -735,6 +735,9 @@ class AIPlayer(Player):
         except Exception:
             return 0.0
 
+    ##
+    # Store a transition for later training.
+    ##
     def addTransition(self, prevState, action, nextState, done=False, terminalReward=None):
         # Call this in registerWin with done=True and terminalReward=+1/-1
         try:
@@ -746,6 +749,9 @@ class AIPlayer(Player):
         except Exception:
             pass
 
+    ##
+    # Train from all stored transitions.
+    ##
     def trainFromTransitions(self):
         # shuffle transitions for better convergence
         random.shuffle(self.transitions)
