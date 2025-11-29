@@ -37,17 +37,17 @@ Steps to implement TD Learning:
        td_error = target - V_current
        backward(state, target)
 
-6. Update getMove() Method (Leonie)
+6. Update getMove() Method (Leonie) #DONE
    - Store previous state before making a move
    - After opponent's turn, calculate reward
    - Train on transition: (prev_state, move, reward, current_state)
 
-7. Modify registerWin() Method (Leonie)
+7. Modify registerWin() Method (Leonie) #DONE
    - Train on final transition with terminal reward
    - Process entire episode's transitions
    - Update network weights based on accumulated TD errors
 
-8. Add Episode Memory (Leonie)
+8. Add Episode Memory (Leonie) #DONE
    - Store sequence of states and actions during each game:
      self.episodeHistory = []  # List of (state, action, reward) tuples
 
@@ -389,9 +389,9 @@ class StateEncoder:
 #   - TD(0) training: Updates value estimates using V(s) ← V(s) + α[R + γV(s') - V(s)]
 #
 # Learning parameters:
-#   - γ (gamma) = 0.95: Discount factor for future rewards
+#   - γ (gamma) = 0.9: Discount factor for future rewards
 #   - ε (epsilon) = 1.0 → 0.05: Exploration rate with 0.995 decay per episode
-#   - α (learning rate) = 0.5: Step size for gradient descent
+#   - α (learning rate) = 0.1: Step size for gradient descent
 ##
 class AIPlayer(Player):
     
@@ -407,15 +407,20 @@ class AIPlayer(Player):
         # Store tuples of (state_features, action, reward, next_state_features, done)
         self.transitions = []
 
-        self.gamma = 0.95  # discount factor
+        self.gamma = 0.9  # discount factor
         self.turnPenalty = -0.01  # small step penalty to encourage faster wins
-        
+        self.alpha = 0.01  # learning rate (used for TD targets if needed)
+        self.V = {}
+
         self.epsilon = 1.0  # Start with full exploration
         self.epsilonMin = 0.05  # Minimum exploration rate
         self.epsilonDecay = 0.995  # Decay rate per episode
         
         self.prevState = None
         self.prevAction = None
+
+        # Episode memory (sequence of transitions)
+        self.episodeHistory = []  # list of (stateFeatures, action, reward, nextStateFeatures, done)
     
     
     ##
@@ -514,29 +519,42 @@ class AIPlayer(Player):
         return enemyLocations[random.randint(0, len(enemyLocations) - 1)]
     
     ##
-    # Store a transition for TD learning.
-    # finalize last transition with terminal reward, then train on all transitions
+    # Called at end of episode. Add final terminal transition, train on all transitions,
+    # optionally: perform an episode pass, decay epsilon, and clear episode memory.
     ##
     def registerWin(self, hasWon):
-        # Record final transition with terminal reward and done=True
+        # Add terminal transition if we have a prevState (the last action we took)
         if self.prevState is not None:
             finalReward = 1.0 if hasWon else -1.0
-            # Create terminal transition (nextState can be None or current since it does not matter)
+            # Use nextState=None to indicate terminal; done=True
             self.addTransition(
-                prevState=self.prevState, 
-                action=self.prevAction, 
+                prevState=self.prevState,
+                action=self.prevAction,
                 nextState=None,
-                done=True, 
+                done=True,
                 terminalReward=finalReward
             )
-        
-        # train on collected transitions
+
+        # Train on the collected transitions (shuffled batch)
         self.trainFromTransitions()
-        
-        # decay epsilon
+
+        # Optional: do a sequential episode pass (forward) using episodeHistory to
+        # enforce TD terminal propagation (this is redundant with trainFromTransitions,
+        # but kept here if you want an ordered pass)
+        try:
+            for (sf, action, r, nsf, done) in self.episodeHistory:
+                if sf is None:
+                    continue
+                # If nsf is None and done=True, train with terminal target
+                self.trainOnTDExample(sf, r, nsf, done)
+        except Exception:
+            pass
+
+        # decay exploration rate
         self.epsilon = max(self.epsilonMin, self.epsilon * self.epsilonDecay)
-        
-        # Reset previous state/action for next episode
+
+        # reset episode memory and prev state/action
+        self.episodeHistory = []
         self.prevState = None
         self.prevAction = None
     
@@ -739,26 +757,182 @@ class AIPlayer(Player):
     # Store a transition for later training.
     ##
     def addTransition(self, prevState, action, nextState, done=False, terminalReward=None):
-        # Call this in registerWin with done=True and terminalReward=+1/-1
         try:
             sf = StateEncoder.encodeState(prevState, self.playerId)
-            nsf = StateEncoder.encodeState(nextState, self.playerId) if nextState else None
-            # Reward computed from state diff; final outcome handled in registerWin
-            r = self.computeReward(prevState, action, nextState, done, terminalReward)
-            self.transitions.append((sf, action, r, nsf, done))
         except Exception:
-            pass
+            sf = None
+
+        nsf = None
+        if nextState is not None:
+            try:
+                nsf = StateEncoder.encodeState(nextState, self.playerId)
+            except Exception:
+                nsf = None
+
+        # compute the reward now (terminalReward passed when registering final reward)
+        r = 0.0
+        try:
+            r = self.computeReward(prevState, action, nextState, done, terminalReward)
+        except Exception:
+            r = 0.0
+
+        # Append to batch transitions if we have encodings (used by trainFromTransitions)
+        if sf is not None:
+            self.transitions.append((sf, action, r, nsf, done))
+
+        # Append the raw/encoded transition to episode history for end-of-episode processing
+        self.episodeHistory.append((sf, action, r, nsf, done))
 
     ##
     # Train from all stored transitions.
     ##
     def trainFromTransitions(self):
-        # shuffle transitions for better convergence
+        if not self.transitions:
+            return
+
         random.shuffle(self.transitions)
-        
         try:
             for (sf, action, r, nsf, done) in self.transitions:
+                # trainOnTDExample uses network.predict internally
                 self.trainOnTDExample(sf, r, nsf, done)
         finally:
-            # Clear transitions after training
+            # Clear transitions after training to start fresh for next episode
             self.transitions = []
+
+
+    ##
+    # TD Learning Update Rule
+    # updates the value of each state based on its reward, the learning rate, the discount factor, and the next state's value
+    ##
+    def tdUpdate(self, oldState, reward, newState):
+        old_key = self.stateCategory(oldState)
+        new_key = self.stateCategory(newState)
+
+        old_value = self.V.get(old_key, 0.0)
+        new_value = self.V.get(new_key, 0.0)
+
+        td_target = reward + self.gamma * new_value
+        td_error = td_target - old_value
+
+        self.V[old_key] = old_value + self.alpha * td_error
+
+    ##
+    # assigns states into categories to limit space needed to store state values
+    # category is assigned based on economy, srmy strength, queen danger, and game phase of state
+    # returns a tuple used to index the TD value table
+    ##
+    def stateCategory(self, state):
+        ## Economy
+
+        # food category based on number of food player has
+        food = state.inventories[state.whoseTurn].food
+        if food <= 2:
+            food_cat = 0
+        elif food <= 5:
+            food_cat = 1
+        else:
+            food_cat = 2
+
+        # worker category based on number of workers
+        workers = [a for a in getAntList(state, state.whoseTurn) if a.type == WORKER]
+        for worker in workers:
+        if workers == 0:
+            worker_cat = 0
+        elif workers == 1:
+            worker_cat = 1
+        else:
+            worker_cat = 2
+
+        # worker distance category based on distance from carrying worker to anthill or tunnel / non-carrying worker to food
+        workers = [a for a in getAntList(state, state.whoseTurn) if a.type == WORKER]
+        foodObjs = self.getCurrPlayerFood(state)
+        tunnel = getCurrPlayerInventory(state).getTunnel()
+        anthill = getCurrPlayerInventory(state).getAnthill()
+        distances = []
+        for worker in workers:
+            if worker.carrying:
+                distances.append(min(approxDist(worker.coords, foodObjs[0].coords),
+                                     approxDist(worker.coords, foodObjs[1].coords)))
+            else:
+                distances.append(
+                    min(approxDist(worker.coords, tunnel.coords), approxDist(worker.coords, anthill.coords)))
+        average_distance = sum(distances) / len(distances)
+        if average_distance < 3:
+            worker_dist_cat = 0 # close or on target
+        elif average_distance < 5:
+            worker_dist_cat = 1 # moving towards target
+        else:
+            worker_dist_cat = 2 # far away from target
+
+        ## Army Strength
+
+        # difference in army strength
+        my_combat = len([a for a in getAntList(state, state.whoseTurn) if a.type in (SOLDIER, DRONE)])
+        opp_combat = len([a for a in getAntList(state, 1 - state.whoseTurn) if a.type in (SOLDIER, DRONE)])
+        diff = my_combat - opp_combat
+        if diff <= -2:
+            army_diff_cat = 0  # behind
+        elif diff <= 1:
+            army_diff_cat = 1  # equal
+        else:
+            army_diff_cat = 2  # ahead
+
+        # army strength
+        if my_combat <= 1:
+            army_cat = 0  # behind
+        elif diff <= 4:
+            army_cat = 1  # equal
+        else:
+            army_cat = 2  # ahead
+
+        ## Queen
+
+        # queen danger based on closest attacking ant from opponent
+        my_queen = getAntList(state, state.whoseTurn, (QUEEN,))[0]
+        enemy_soldiers = getAntList(state, 1 - state.whoseTurn, (SOLDIER,))
+        if enemy_soldiers:
+            dists = [approxDist(my_queen.coords, s.coords) for s in enemy_soldiers]
+            min_dist = min(dists)
+            if min_dist <= 3:
+                q_d_cat = 2  # very close
+            elif min_dist <= 6:
+                q_d_cat = 1  # approaching
+            else:
+                q_d_cat = 0  # none in sight
+        else:
+            q_d_cat = 0
+
+        # queen's health
+        if my_queen.health <= 4:
+            q_h_cat = 2 # dying
+        elif my_queen.health <= 7:
+            q_h_cat = 1 # badly injured
+        else:
+            q_h_cat = 0 # healthy
+
+        ## Game phase
+
+        #number of turns taken
+        if state.turn <= 15:
+            phase = 0 # early in the game
+        elif state.turn <= 30:
+            phase = 1 # middle of the game
+        else:
+            phase = 2 # game has been going on for a while
+
+        # Return a compact categorical representation
+        return (food_cat, worker_cat, worker_dist_cat, army_diff_cat, army_cat, q_d_cat, q_h_cat, phase)
+
+
+    ##
+    # Return: a list of the food objects on my side of the board
+    def getCurrPlayerFood(self, currentState):
+        food = getConstrList(currentState, 2, (FOOD,))
+        myFood = []
+        if (currentState.inventories[0].player == currentState.whoseTurn):
+            myFood.append(food[2])
+            myFood.append(food[3])
+        else:
+            myFood.append(food[0])
+            myFood.append(food[1])
+        return myFood
