@@ -411,6 +411,7 @@ class AIPlayer(Player):
         self.turnPenalty = -0.01  # small step penalty to encourage faster wins
         self.alpha = 0.01  # learning rate (used for TD targets if needed)
         self.V = {}
+        self.load_value_table()
 
         self.epsilon = 1.0  # Start with full exploration
         self.epsilonMin = 0.05  # Minimum exploration rate
@@ -463,23 +464,13 @@ class AIPlayer(Player):
     # ε-greedy over V(s') predictions
     ##
     def getMove(self, currentState):
-        # adds transition from previous move
-        if self.prevState is not None and self.prevAction is not None:
-            # now in current state after taking prevAction from prevState
-            self.addTransition(
-                prevState=self.prevState,
-                action=self.prevAction,
-                nextState=currentState,
-                done=False, # game not done yet
-                terminalReward=None
-            )
-        
         # consider all legal moves
         moves = listAllLegalMoves(currentState)
         
         if not moves:
             return Move(END)
-        
+
+        utility = 0
         # ε-greedy: explore or exploit
         if random.random() < self.epsilon:
             # Explore: choose random move
@@ -505,13 +496,28 @@ class AIPlayer(Player):
             # Fallback in case no best move found     
             if bestMove is None:
                 bestMove = random.choice(moves)
-        
+
+        # adds transition from previous move
+        if self.prevState is not None and self.prevAction is not None:
+            # now in current state after taking prevAction from prevState
+            self.addTransition(
+                prevState=self.prevState,
+                action=self.prevAction,
+                nextState=currentState,
+                done=False,  # game not done yet
+                terminalReward=None
+            )
+
+            # call td update rule to update state value table
+            self.tdUpdate(self.prevState, utility, currentState)
+
         # what state we were in before making this move
         self.prevState = currentState # Save state before move
         self.prevAction = bestMove # Save chosen move
         
         return bestMove 
-    
+
+
     ##
     # Same as always: random attack from available enemies
     ##
@@ -557,6 +563,7 @@ class AIPlayer(Player):
         self.episodeHistory = []
         self.prevState = None
         self.prevAction = None
+        self.save_value_table()
     
 
     # ===============================
@@ -758,14 +765,14 @@ class AIPlayer(Player):
     ##
     def addTransition(self, prevState, action, nextState, done=False, terminalReward=None):
         try:
-            sf = StateEncoder.encodeState(prevState, self.playerId)
+            sf = self.stateCategory(prevState)
         except Exception:
             sf = None
 
         nsf = None
         if nextState is not None:
             try:
-                nsf = StateEncoder.encodeState(nextState, self.playerId)
+                nsf = self.stateCategory(nextState)
             except Exception:
                 nsf = None
 
@@ -805,6 +812,7 @@ class AIPlayer(Player):
     # updates the value of each state based on its reward, the learning rate, the discount factor, and the next state's value
     ##
     def tdUpdate(self, oldState, reward, newState):
+
         old_key = self.stateCategory(oldState)
         new_key = self.stateCategory(newState)
 
@@ -816,16 +824,17 @@ class AIPlayer(Player):
 
         self.V[old_key] = old_value + self.alpha * td_error
 
-    ##
-    # assigns states into categories to limit space needed to store state values
-    # category is assigned based on economy, srmy strength, queen danger, and game phase of state
-    # returns a tuple used to index the TD value table
-    ##
+
+    # ##
+    # # assigns states into categories to limit space needed to store state values
+    # # category is assigned based on economy, army strength, and queen's danger of state
+    # # returns a tuple used to index the TD value table
+    # ##
     def stateCategory(self, state):
         ## Economy
 
         # food category based on number of food player has
-        food = state.inventories[state.whoseTurn].food
+        food = state.inventories[self.playerId].foodCount
         if food <= 2:
             food_cat = 0
         elif food <= 5:
@@ -834,19 +843,19 @@ class AIPlayer(Player):
             food_cat = 2
 
         # worker category based on number of workers
-        workers = [a for a in getAntList(state, state.whoseTurn) if a.type == WORKER]
-        for worker in workers:
-        if workers == 0:
+        workers = [a for a in getAntList(state, self.playerId) if a.type == WORKER]
+        num_workers = len(workers)
+        if num_workers == 0:
             worker_cat = 0
-        elif workers == 1:
+        elif num_workers == 1:
             worker_cat = 1
         else:
             worker_cat = 2
 
         # worker distance category based on distance from carrying worker to anthill or tunnel / non-carrying worker to food
-        workers = [a for a in getAntList(state, state.whoseTurn) if a.type == WORKER]
+        workers = [a for a in getAntList(state, self.playerId) if a.type == WORKER]
         foodObjs = self.getCurrPlayerFood(state)
-        tunnel = getCurrPlayerInventory(state).getTunnel()
+        tunnel = getCurrPlayerInventory(state).getTunnels()[0]
         anthill = getCurrPlayerInventory(state).getAnthill()
         distances = []
         for worker in workers:
@@ -856,7 +865,7 @@ class AIPlayer(Player):
             else:
                 distances.append(
                     min(approxDist(worker.coords, tunnel.coords), approxDist(worker.coords, anthill.coords)))
-        average_distance = sum(distances) / len(distances)
+        average_distance = sum(distances) / len(distances) if len(distances) > 0 else 0
         if average_distance < 3:
             worker_dist_cat = 0 # close or on target
         elif average_distance < 5:
@@ -867,8 +876,8 @@ class AIPlayer(Player):
         ## Army Strength
 
         # difference in army strength
-        my_combat = len([a for a in getAntList(state, state.whoseTurn) if a.type in (SOLDIER, DRONE)])
-        opp_combat = len([a for a in getAntList(state, 1 - state.whoseTurn) if a.type in (SOLDIER, DRONE)])
+        my_combat = len([a for a in getAntList(state, self.playerId) if a.type in (SOLDIER, DRONE)])
+        opp_combat = len([a for a in getAntList(state, 1 - self.playerId) if a.type in (SOLDIER, DRONE)])
         diff = my_combat - opp_combat
         if diff <= -2:
             army_diff_cat = 0  # behind
@@ -888,8 +897,8 @@ class AIPlayer(Player):
         ## Queen
 
         # queen danger based on closest attacking ant from opponent
-        my_queen = getAntList(state, state.whoseTurn, (QUEEN,))[0]
-        enemy_soldiers = getAntList(state, 1 - state.whoseTurn, (SOLDIER,))
+        my_queen = getAntList(state, self.playerId, (QUEEN,))[0]
+        enemy_soldiers = getAntList(state, 1 - self.playerId, (SOLDIER,))
         if enemy_soldiers:
             dists = [approxDist(my_queen.coords, s.coords) for s in enemy_soldiers]
             min_dist = min(dists)
@@ -910,18 +919,10 @@ class AIPlayer(Player):
         else:
             q_h_cat = 0 # healthy
 
-        ## Game phase
-
-        #number of turns taken
-        if state.turn <= 15:
-            phase = 0 # early in the game
-        elif state.turn <= 30:
-            phase = 1 # middle of the game
-        else:
-            phase = 2 # game has been going on for a while
 
         # Return a compact categorical representation
-        return (food_cat, worker_cat, worker_dist_cat, army_diff_cat, army_cat, q_d_cat, q_h_cat, phase)
+        return food_cat * 10000000 + worker_cat * 1000000 + worker_dist_cat * 100000 + army_diff_cat * 10000 + army_cat * 1000 + q_d_cat * 100 + q_h_cat * 10 + q_h_cat
+        # return (food_cat, worker_cat, worker_dist_cat, army_diff_cat, army_cat, q_d_cat, q_h_cat, phase)
 
 
     ##
@@ -936,3 +937,29 @@ class AIPlayer(Player):
             myFood.append(food[0])
             myFood.append(food[1])
         return myFood
+
+    def save_value_table(self, filename="value_table.json"):
+        with open(filename, "w") as f:
+            json.dump(self.V, f)
+
+    def load_value_table(self, filename="value_table.json"):
+        try:
+            with open(filename, "r") as f:
+                content = f.read().strip()
+
+                # If file exists but is empty → start fresh
+                if content == "":
+                    print("Value table file is empty. Starting fresh.")
+                    self.V = {}
+                    return
+
+                # Otherwise try to decode JSON content
+                self.V = json.loads(content)
+
+        except FileNotFoundError:
+            print("No saved value table found. Starting fresh.")
+            self.V = {}
+
+        except json.JSONDecodeError:
+            print("Value table file is invalid or corrupted. Starting fresh.")
+            self.V = {}
