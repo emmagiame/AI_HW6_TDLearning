@@ -531,6 +531,15 @@ class AIPlayer(Player):
         # Add terminal transition if we have a prevState (the last action we took)
         if self.prevState is not None:
             finalReward = 1.0 if hasWon else -1.0
+            
+            # CRITICAL: Update V table with terminal reward!
+            # This propagates win/loss signal into the value table
+            old_key = self.stateCategory(self.prevState)
+            old_value = self.V.get(old_key, 0.0)
+            # Terminal state: no next state, so target is just the reward
+            td_error = finalReward - old_value
+            self.V[old_key] = old_value + self.alpha * td_error
+            
             # Use nextState=None to indicate terminal; done=True
             self.addTransition(
                 prevState=self.prevState,
