@@ -408,8 +408,8 @@ class AIPlayer(Player):
         self.transitions = []
 
         self.gamma = 0.9  # discount factor
-        self.turnPenalty = -0.01  # small step penalty to encourage faster wins
-        self.alpha = 0.01  # learning rate (used for TD targets if needed)
+        self.turnPenalty = -0.005  # smaller step penalty (was -0.01)
+        self.alpha = 0.1  # learning rate - increased for faster learning (was 0.01)
         self.V = {}
         self.load_value_table()
 
@@ -506,8 +506,14 @@ class AIPlayer(Player):
                 terminalReward=None
             )
 
-            # call td update rule to update state value table
-            reward = self.turnPenalty  # small penalty per turn to encourage faster wins
+            # Calculate reward with shaping
+            reward = self.turnPenalty  # base penalty per turn
+            
+            # Penalty for too many workers (more than 2 is wasteful)
+            workers = [a for a in getAntList(currentState, self.playerId) if a.type == WORKER]
+            if len(workers) > 2:
+                reward -= 0.02 * (len(workers) - 2)  # extra penalty per excess worker
+            
             self.tdUpdate(self.prevState, reward, currentState)
 
         # what state we were in before making this move
