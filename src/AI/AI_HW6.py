@@ -399,7 +399,7 @@ class AIPlayer(Player):
     # Initialize the neural network AI player.
     ##
     def __init__(self, inputPlayerId): 
-        super(AIPlayer, self).__init__(inputPlayerId, "ANN_PartB_AI")
+        super(AIPlayer, self).__init__(inputPlayerId, "AI_HW6")
         
         # Initialize neural network
         self.network = NeuralNetwork(inputSize=13, hiddenSize1=32, hiddenSize2=16, outputSize=1, learningRate=0.5)
@@ -413,9 +413,10 @@ class AIPlayer(Player):
         self.V = {}
         self.load_value_table()
 
-        self.epsilon = 1.0  # Start with full exploration
         self.epsilonMin = 0.05  # Minimum exploration rate
         self.epsilonDecay = 0.995  # Decay rate per episode
+        self.epsilon = 1.0  # Default: full exploration (will be overwritten if saved)
+        self.load_epsilon()  # Load saved epsilon if it exists
         
         self.prevState = None
         self.prevAction = None
@@ -461,7 +462,7 @@ class AIPlayer(Player):
     
     ##
     # Move selection
-    # ε-greedy over V(s') predictions
+    # ε-greedy over V(s') predictions using the V table (tabular TD learning)
     ##
     def getMove(self, currentState):
         # consider all legal moves
@@ -470,24 +471,21 @@ class AIPlayer(Player):
         if not moves:
             return Move(END)
 
-        utility = 0
         # ε-greedy: explore or exploit
         if random.random() < self.epsilon:
             # Explore: choose random move
             bestMove = random.choice(moves)
         else:
-            # Exploit: choose best move based on network evaluation
+            # Exploit: choose best move based on V table lookup (fast!)
             bestMove = None
             bestUtility = -float('inf')
             
             for move in moves:
                 nextState = getNextState(currentState, move)
                 
-                try:
-                    features = StateEncoder.encodeState(nextState, currentState.whoseTurn)
-                    utility = float(self.network.predict(features))
-                except Exception:
-                    utility = 0.0
+                # Use V table lookup instead of neural network (much faster)
+                stateKey = self.stateCategory(nextState)
+                utility = self.V.get(stateKey, 0.0)
                 
                 if utility > bestUtility:
                     bestUtility = utility
@@ -509,7 +507,8 @@ class AIPlayer(Player):
             )
 
             # call td update rule to update state value table
-            self.tdUpdate(self.prevState, utility, currentState)
+            reward = self.turnPenalty  # small penalty per turn to encourage faster wins
+            self.tdUpdate(self.prevState, reward, currentState)
 
         # what state we were in before making this move
         self.prevState = currentState # Save state before move
@@ -564,6 +563,7 @@ class AIPlayer(Player):
         self.prevState = None
         self.prevAction = None
         self.save_value_table()
+        self.save_epsilon()  # Save epsilon to preserve exploration progress
     
 
     # ===============================
@@ -939,12 +939,18 @@ class AIPlayer(Player):
         return myFood
 
     def save_value_table(self, filename="value_table.json"):
-        with open(filename, "w") as f:
+        # Use absolute path relative to this script's parent directory (src/)
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        filepath = os.path.join(script_dir, "..", filename)
+        with open(filepath, "w") as f:
             json.dump(self.V, f)
 
     def load_value_table(self, filename="value_table.json"):
+        # Use absolute path relative to this script's parent directory (src/)
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        filepath = os.path.join(script_dir, "..", filename)
         try:
-            with open(filename, "r") as f:
+            with open(filepath, "r") as f:
                 content = f.read().strip()
 
                 # If file exists but is empty → start fresh
@@ -963,3 +969,23 @@ class AIPlayer(Player):
         except json.JSONDecodeError:
             print("Value table file is invalid or corrupted. Starting fresh.")
             self.V = {}
+
+    def save_epsilon(self, filename="epsilon.json"):
+        # Save epsilon to preserve exploration progress across sessions
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        filepath = os.path.join(script_dir, "..", filename)
+        with open(filepath, "w") as f:
+            json.dump({"epsilon": self.epsilon}, f)
+
+    def load_epsilon(self, filename="epsilon.json"):
+        # Load epsilon to resume training from where we left off
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        filepath = os.path.join(script_dir, "..", filename)
+        try:
+            with open(filepath, "r") as f:
+                data = json.load(f)
+                self.epsilon = data.get("epsilon", 1.0)
+                print(f"Loaded epsilon: {self.epsilon:.4f}")
+        except (FileNotFoundError, json.JSONDecodeError):
+            print("No saved epsilon found. Starting with full exploration.")
+            self.epsilon = 1.0
