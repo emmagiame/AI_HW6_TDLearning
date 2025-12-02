@@ -506,14 +506,8 @@ class AIPlayer(Player):
                 terminalReward=None
             )
 
-            # Calculate reward with shaping
-            reward = self.turnPenalty  # base penalty per turn
-            
-            # Penalty for too many workers (more than 2 is wasteful)
-            workers = [a for a in getAntList(currentState, self.playerId) if a.type == WORKER]
-            if len(workers) > 2:
-                reward -= 0.02 * (len(workers) - 2)  # extra penalty per excess worker
-            
+            # Calculate reward - just turn penalty, let terminal rewards guide learning
+            reward = self.turnPenalty
             self.tdUpdate(self.prevState, reward, currentState)
 
         # what state we were in before making this move
