@@ -528,46 +528,36 @@ class AIPlayer(Player):
     # optionally: perform an episode pass, decay epsilon, and clear episode memory.
     ##
     def registerWin(self, hasWon):
-        # Add terminal transition if we have a prevState (the last action we took)
+        finalReward = 1.0 if hasWon else -1.0
+        
+        # BACKWARD PROPAGATION: Update all states in episode history
+        # Start from terminal reward and propagate backward
+        futureValue = finalReward
+        
+        # Get all state keys visited this episode (trans[0] is already the state key)
+        # Process in reverse order to propagate values backward
+        episode_states = []
+        for trans in self.transitions:
+            if trans[0] is not None:  # trans[0] is already the state_key (from stateCategory)
+                episode_states.append(trans[0])
+        
+        # Add the final state if we have one
         if self.prevState is not None:
-            finalReward = 1.0 if hasWon else -1.0
-            
-            # CRITICAL: Update V table with terminal reward!
-            # This propagates win/loss signal into the value table
-            old_key = self.stateCategory(self.prevState)
-            old_value = self.V.get(old_key, 0.0)
-            # Terminal state: no next state, so target is just the reward
-            td_error = finalReward - old_value
-            self.V[old_key] = old_value + self.alpha * td_error
-            
-            # Use nextState=None to indicate terminal; done=True
-            self.addTransition(
-                prevState=self.prevState,
-                action=self.prevAction,
-                nextState=None,
-                done=True,
-                terminalReward=finalReward
-            )
-
-        # Train on the collected transitions (shuffled batch)
-        self.trainFromTransitions()
-
-        # Optional: do a sequential episode pass (forward) using episodeHistory to
-        # enforce TD terminal propagation (this is redundant with trainFromTransitions,
-        # but kept here if you want an ordered pass)
-        try:
-            for (sf, action, r, nsf, done) in self.episodeHistory:
-                if sf is None:
-                    continue
-                # If nsf is None and done=True, train with terminal target
-                self.trainOnTDExample(sf, r, nsf, done)
-        except Exception:
-            pass
+            episode_states.append(self.stateCategory(self.prevState))
+        
+        # Backward pass: propagate value from terminal state back through episode
+        for state_key in reversed(episode_states):
+            old_value = self.V.get(state_key, 0.0)
+            td_error = futureValue - old_value
+            self.V[state_key] = old_value + self.alpha * td_error
+            # Next iteration's future value is this state's updated value (discounted)
+            futureValue = self.gamma * self.V[state_key]
 
         # decay exploration rate
         self.epsilon = max(self.epsilonMin, self.epsilon * self.epsilonDecay)
 
         # reset episode memory and prev state/action
+        self.transitions = []
         self.episodeHistory = []
         self.prevState = None
         self.prevAction = None
