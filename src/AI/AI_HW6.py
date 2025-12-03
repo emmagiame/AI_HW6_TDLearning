@@ -423,6 +423,10 @@ class AIPlayer(Player):
 
         # Episode memory (sequence of transitions)
         self.episodeHistory = []  # list of (stateFeatures, action, reward, nextStateFeatures, done)
+        
+        # Game counter for periodic saving (every 50 games instead of every game)
+        self.gameCount = 0
+        self.saveInterval = 50
     
     
     ##
@@ -561,8 +565,12 @@ class AIPlayer(Player):
         self.episodeHistory = []
         self.prevState = None
         self.prevAction = None
-        self.save_value_table()
-        self.save_epsilon()  # Save epsilon to preserve exploration progress
+        
+        # Only save periodically to avoid slow disk I/O every game
+        self.gameCount += 1
+        if self.gameCount % self.saveInterval == 0:
+            self.save_value_table()
+            self.save_epsilon()  # Save epsilon to preserve exploration progress
     
 
     # ===============================
@@ -859,11 +867,13 @@ class AIPlayer(Player):
         distances = []
         for worker in workers:
             if worker.carrying:
-                distances.append(min(approxDist(worker.coords, foodObjs[0].coords),
-                                     approxDist(worker.coords, foodObjs[1].coords)))
-            else:
+                # Carrying worker should go HOME (tunnel/anthill)
                 distances.append(
                     min(approxDist(worker.coords, tunnel.coords), approxDist(worker.coords, anthill.coords)))
+            else:
+                # Non-carrying worker should go to FOOD
+                distances.append(min(approxDist(worker.coords, foodObjs[0].coords),
+                                     approxDist(worker.coords, foodObjs[1].coords)))
         average_distance = sum(distances) / len(distances) if len(distances) > 0 else 0
         if average_distance < 3:
             worker_dist_cat = 0 # close or on target
@@ -871,6 +881,17 @@ class AIPlayer(Player):
             worker_dist_cat = 1 # moving towards target
         else:
             worker_dist_cat = 2 # far away from target
+        
+        # Carrying status - are workers carrying food?
+        carrying_count = sum(1 for w in workers if w.carrying)
+        if num_workers == 0:
+            carry_cat = 0
+        elif carrying_count == 0:
+            carry_cat = 0  # no one carrying
+        elif carrying_count == num_workers:
+            carry_cat = 2  # all carrying
+        else:
+            carry_cat = 1  # some carrying
 
         ## Army Strength
 
@@ -920,8 +941,9 @@ class AIPlayer(Player):
 
 
         # Return a compact categorical representation
-        return food_cat * 10000000 + worker_cat * 1000000 + worker_dist_cat * 100000 + army_diff_cat * 10000 + army_cat * 1000 + q_d_cat * 100 + q_h_cat * 10 + q_h_cat
-        # return (food_cat, worker_cat, worker_dist_cat, army_diff_cat, army_cat, q_d_cat, q_h_cat, phase)
+        # 8 categories: food(3) * worker(3) * dist(3) * carry(3) * army_diff(3) * army(3) * q_danger(3) * q_health(3) = 6561 states
+        return (food_cat * 2187 + worker_cat * 729 + worker_dist_cat * 243 + 
+                carry_cat * 81 + army_diff_cat * 27 + army_cat * 9 + q_d_cat * 3 + q_h_cat)
 
 
     ##
