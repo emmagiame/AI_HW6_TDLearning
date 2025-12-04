@@ -474,6 +474,22 @@ class AIPlayer(Player):
         
         if not moves:
             return Move(END)
+        
+        # FILTER: Limit unit production to keep games fast
+        myAnts = currentState.inventories[self.playerId].ants
+        numWorkers = sum(1 for a in myAnts if a.type == WORKER)
+        numCombat = sum(1 for a in myAnts if a.type in (SOLDIER, DRONE, R_SOLDIER))
+        
+        # Don't build more than 2 workers
+        if numWorkers >= 2:
+            moves = [m for m in moves if not (m.moveType == BUILD and m.buildType == WORKER)]
+        
+        # Don't build more than 1 combat unit
+        if numCombat >= 1:
+            moves = [m for m in moves if not (m.moveType == BUILD and m.buildType in (SOLDIER, DRONE, R_SOLDIER))]
+        
+        if not moves:
+            return Move(END)
 
         # ε-greedy: explore or exploit
         if random.random() < self.epsilon:
@@ -771,31 +787,13 @@ class AIPlayer(Player):
     # Store a transition for later training.
     ##
     def addTransition(self, prevState, action, nextState, done=False, terminalReward=None):
+        # SIMPLIFIED: Just store the state key for backward propagation
+        # Skip expensive reward calculation - we use terminal rewards only
         try:
             sf = self.stateCategory(prevState)
+            self.transitions.append((sf, action, 0.0, None, done))
         except Exception:
-            sf = None
-
-        nsf = None
-        if nextState is not None:
-            try:
-                nsf = self.stateCategory(nextState)
-            except Exception:
-                nsf = None
-
-        # compute the reward now (terminalReward passed when registering final reward)
-        r = 0.0
-        try:
-            r = self.computeReward(prevState, action, nextState, done, terminalReward)
-        except Exception:
-            r = 0.0
-
-        # Append to batch transitions if we have encodings (used by trainFromTransitions)
-        if sf is not None:
-            self.transitions.append((sf, action, r, nsf, done))
-
-        # Append the raw/encoded transition to episode history for end-of-episode processing
-        self.episodeHistory.append((sf, action, r, nsf, done))
+            pass
 
     ##
     # Train from all stored transitions.
@@ -838,9 +836,25 @@ class AIPlayer(Player):
     # # returns a tuple used to index the TD value table
     # ##
     def stateCategory(self, state):
+        # Get all ants ONCE for efficiency
+        myAnts = state.inventories[self.playerId].ants
+        oppAnts = state.inventories[1 - self.playerId].ants
+        
+        # Categorize my ants
+        workers = [a for a in myAnts if a.type == WORKER]
+        my_queen = None
+        my_combat = 0
+        for a in myAnts:
+            if a.type == QUEEN:
+                my_queen = a
+            elif a.type in (SOLDIER, DRONE):
+                my_combat += 1
+        
+        # Categorize opponent ants
+        enemy_soldiers = [a for a in oppAnts if a.type == SOLDIER]
+        opp_combat = sum(1 for a in oppAnts if a.type in (SOLDIER, DRONE))
+        
         ## Economy
-
-        # food category based on number of food player has
         food = state.inventories[self.playerId].foodCount
         if food <= 2:
             food_cat = 0
@@ -849,8 +863,7 @@ class AIPlayer(Player):
         else:
             food_cat = 2
 
-        # worker category based on number of workers
-        workers = [a for a in getAntList(state, self.playerId) if a.type == WORKER]
+        # worker category
         num_workers = len(workers)
         if num_workers == 0:
             worker_cat = 0
@@ -859,89 +872,81 @@ class AIPlayer(Player):
         else:
             worker_cat = 2
 
-        # worker distance category based on distance from carrying worker to anthill or tunnel / non-carrying worker to food
-        workers = [a for a in getAntList(state, self.playerId) if a.type == WORKER]
-        foodObjs = self.getCurrPlayerFood(state)
-        tunnel = getCurrPlayerInventory(state).getTunnels()[0]
-        anthill = getCurrPlayerInventory(state).getAnthill()
-        distances = []
-        for worker in workers:
-            if worker.carrying:
-                # Carrying worker should go HOME (tunnel/anthill)
-                distances.append(
-                    min(approxDist(worker.coords, tunnel.coords), approxDist(worker.coords, anthill.coords)))
+        # worker distance category
+        if num_workers > 0:
+            inv = state.inventories[self.playerId]
+            tunnel = inv.getTunnels()[0] if inv.getTunnels() else None
+            anthill = inv.getAnthill()
+            foodObjs = self.getCurrPlayerFood(state)
+            
+            total_dist = 0
+            for worker in workers:
+                if worker.carrying:
+                    d = min(approxDist(worker.coords, tunnel.coords) if tunnel else 99,
+                            approxDist(worker.coords, anthill.coords) if anthill else 99)
+                else:
+                    d = min(approxDist(worker.coords, foodObjs[0].coords),
+                            approxDist(worker.coords, foodObjs[1].coords))
+                total_dist += d
+            avg_dist = total_dist / num_workers
+            
+            if avg_dist < 3:
+                worker_dist_cat = 0
+            elif avg_dist < 5:
+                worker_dist_cat = 1
             else:
-                # Non-carrying worker should go to FOOD
-                distances.append(min(approxDist(worker.coords, foodObjs[0].coords),
-                                     approxDist(worker.coords, foodObjs[1].coords)))
-        average_distance = sum(distances) / len(distances) if len(distances) > 0 else 0
-        if average_distance < 3:
-            worker_dist_cat = 0 # close or on target
-        elif average_distance < 5:
-            worker_dist_cat = 1 # moving towards target
+                worker_dist_cat = 2
+            
+            # Carrying status
+            carrying = sum(1 for w in workers if w.carrying)
+            if carrying == 0:
+                carry_cat = 0
+            elif carrying == num_workers:
+                carry_cat = 2
+            else:
+                carry_cat = 1
         else:
-            worker_dist_cat = 2 # far away from target
-        
-        # Carrying status - are workers carrying food?
-        carrying_count = sum(1 for w in workers if w.carrying)
-        if num_workers == 0:
+            worker_dist_cat = 2
             carry_cat = 0
-        elif carrying_count == 0:
-            carry_cat = 0  # no one carrying
-        elif carrying_count == num_workers:
-            carry_cat = 2  # all carrying
-        else:
-            carry_cat = 1  # some carrying
 
         ## Army Strength
-
-        # difference in army strength
-        my_combat = len([a for a in getAntList(state, self.playerId) if a.type in (SOLDIER, DRONE)])
-        opp_combat = len([a for a in getAntList(state, 1 - self.playerId) if a.type in (SOLDIER, DRONE)])
         diff = my_combat - opp_combat
         if diff <= -2:
-            army_diff_cat = 0  # behind
+            army_diff_cat = 0
         elif diff <= 1:
-            army_diff_cat = 1  # equal
+            army_diff_cat = 1
         else:
-            army_diff_cat = 2  # ahead
+            army_diff_cat = 2
 
-        # army strength
         if my_combat <= 1:
-            army_cat = 0  # behind
-        elif diff <= 4:
-            army_cat = 1  # equal
+            army_cat = 0
+        elif my_combat <= 4:
+            army_cat = 1
         else:
-            army_cat = 2  # ahead
+            army_cat = 2
 
         ## Queen
-
-        # queen danger based on closest attacking ant from opponent
-        my_queen = getAntList(state, self.playerId, (QUEEN,))[0]
-        enemy_soldiers = getAntList(state, 1 - self.playerId, (SOLDIER,))
-        if enemy_soldiers:
-            dists = [approxDist(my_queen.coords, s.coords) for s in enemy_soldiers]
-            min_dist = min(dists)
+        if my_queen and enemy_soldiers:
+            min_dist = min(approxDist(my_queen.coords, s.coords) for s in enemy_soldiers)
             if min_dist <= 3:
-                q_d_cat = 2  # very close
+                q_d_cat = 2
             elif min_dist <= 6:
-                q_d_cat = 1  # approaching
+                q_d_cat = 1
             else:
-                q_d_cat = 0  # none in sight
+                q_d_cat = 0
         else:
             q_d_cat = 0
 
-        # queen's health
-        if my_queen.health <= 4:
-            q_h_cat = 2 # dying
-        elif my_queen.health <= 7:
-            q_h_cat = 1 # badly injured
+        if my_queen:
+            if my_queen.health <= 4:
+                q_h_cat = 2
+            elif my_queen.health <= 7:
+                q_h_cat = 1
+            else:
+                q_h_cat = 0
         else:
-            q_h_cat = 0 # healthy
+            q_h_cat = 2  # no queen = bad
 
-
-        # Return a compact categorical representation
-        # 8 categories: food(3) * worker(3) * dist(3) * carry(3) * army_diff(3) * army(3) * q_danger(3) * q_health(3) = 6561 states
         return (food_cat * 2187 + worker_cat * 729 + worker_dist_cat * 243 + 
                 carry_cat * 81 + army_diff_cat * 27 + army_cat * 9 + q_d_cat * 3 + q_h_cat)
 
